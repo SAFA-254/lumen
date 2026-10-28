@@ -1197,6 +1197,10 @@ class Handler(BaseHTTPRequestHandler):
                 if self.require_user(api=False):
                     return self.static("index.html")
                 return
+            if u.path == "/api/health":
+                # без входа: для сторожевой проверки с другого узла, только возраст последних данных
+                last = S.q("SELECT MAX(last_ts) FROM hosts")[0][0] or 0
+                return self.send(200, {"ok": True, "last_push_age": round(time.time() - last, 1)})
             if not u.path.startswith("/api/"):
                 return self.send(404, {"error": "not found"})
             user = self.require_user()

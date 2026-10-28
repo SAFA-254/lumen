@@ -75,6 +75,11 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
   -keyout /etc/lumen/server.key -out /etc/lumen/server.crt
 ```
 
+## Отказоустойчивость
+
+- CT с сервером Lumen под HA (`ha-manager add ct:108`): при аварийном падении узла CT перезапускается на другом. При плановой перезагрузке узла политика HA по умолчанию (`conditional`) «замораживает» гостей на месте, и Lumen недоступен, пока узел не вернётся;
+- поэтому на другом узле (pve1) работает сторож `deploy/lumen-watchdog.py` (таймер раз в минуту): если `GET /api/health` не отвечает или данных от агентов нет дольше 3 минут, он пишет в Telegram, напоминает раз в 2 часа и сообщает о восстановлении. Lumen, в свою очередь, следит за pve1 — они страхуют друг друга.
+
 ## Хранение
 
 Сырые точки хранятся 48 часов, средние за 5 минут — 30 дней, история алертов и входов — 30 дней.
@@ -123,6 +128,7 @@ systemctl daemon-reload && systemctl enable --now lumen-agent
 ## API
 
 - `POST /api/push` — приём данных от агента, заголовок `Authorization: Bearer <token>`; в ответе — список проверок для этого агента
+- `GET /api/health` — без входа: работает ли сервер и возраст последних данных (для сторожа)
 - `POST /api/login`, `POST /api/logout` — вход и выход
 - `GET /api/overview` — текущее состояние: хосты, кластер, алерты, события, входы по SSH, прогноз
 - `GET /api/history?host=pve1&metrics=cpu,mem&range=86400` (или `start`/`end`; `scope=host:pve1` добавляет алерты и обслуживание) — временные ряды. Кластерные ряды лежат под псевдохостами `_ceph`, `_etcd`, `_checks`, `_vm<id>`, `_pg_<хост>`

@@ -41,6 +41,12 @@ for ip in 192.168.3.3 192.168.3.4 192.168.3.5; do
   ssh root@$ip 'systemctl daemon-reload && systemctl restart lumen-agent'
 done
 
+# Сторож живёт на pve1 — не на узле с Lumen; шлёт в Telegram через /root/tg-notify.sh
+echo "== pve1: сторож Lumen"
+install -m 755 deploy/lumen-watchdog.py /opt/lumen/lumen-watchdog.py
+install -m 644 deploy/lumen-watchdog.service deploy/lumen-watchdog.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --quiet --now lumen-watchdog.timer
+
 # Команда в VM через qemu-guest-agent; stdin передаётся в гостя. Возвращает код выхода команды в госте.
 guest() { # node vmid команда [stdin-файл]
   local node=$1 vmid=$2 cmd=$3 input=${4:-/dev/null}
