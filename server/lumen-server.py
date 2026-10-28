@@ -71,6 +71,14 @@ RULES_META = {
     "smart_temp_c": (60, "Температура диска выше", "°C", 30, 100),
     "cert_days": (14, "Сертификат HTTPS истекает раньше чем через", "дн", 1, 365),
     "remind_h": (4, "Напоминать о незакрытом алерте каждые (0 — нет)", "ч", 0, 168),
+    "iowait_pct": (30, "Ожидание диска (iowait) выше", "%", 1, 100),
+    "iowait_for_sec": (600, "…дольше", "с", 0, 7200),
+    "anomaly_factor": (4, "Нагрузка выше обычной для этого часа в (0 — не следить)", "раз", 0, 100),
+    "agent_cpu_pct": (10, "Агент Lumen тратит CPU больше", "%", 1, 100),
+    "agent_io_kbs": (1024, "Агент Lumen читает/пишет диск больше", "КБ/с", 10, 10 ** 6),
+    "clock_skew_ms": (500, "Часы хоста расходятся больше чем на", "мс", 10, 600000),
+    "pbs_gc_days": (3, "Очистка (GC) PBS не проходила дольше", "дн", 1, 60),
+    "pbs_verify_days": (14, "Проверка (verify) PBS не проходила дольше", "дн", 1, 120),
 }
 DEFAULT_SETTINGS = {
     "summary_time": "09:00",
@@ -220,6 +228,7 @@ def ip_known(ip, known):
 # ---------------------------------------------------------------- ingest
 
 SERIES_LAST = {}
+CLOCK_SKEW = {}  # host -> последние оценки расхождения часов, мс (агент присылает время отправки)
 
 
 def ingest(p):
@@ -240,6 +249,14 @@ def ingest(p):
                 rows.append((group[:64], k[:128], ts, float(v)))
     latest = {k: p.get(k) for k in ("metrics", "disks", "info", "interval")}
     latest["ts"] = ts
+    clock = dict(p.get("clock") or {})
+    if isinstance(p.get("sent"), (int, float)):
+        # время в пути до сервера — миллисекунды, медиана по 5 отправкам сглаживает задержки сети
+        hist = CLOCK_SKEW.setdefault(host, [])
+        hist.append((p["sent"] - now) * 1000)
+        del hist[:-5]
+        clock["skew_ms"] = round(sorted(hist)[len(hist) // 2], 1)
+    latest["clock"] = clock
     known = settings()["ssh_known"]
     logins = [(host, float(x["ts"]), str(x["user"])[:64], str(x["ip"])[:64], str(x.get("method", ""))[:32],
                int(ip_known(x["ip"], known))) for x in (p.get("ssh_logins") or [])]
@@ -346,6 +363,78 @@ def forecasts():
 
 # ---------------------------------------------------------------- telegram
 
+# ---------------------------------------------------------------- anomalies
+
+# метрика -> (подпись, минимальная разница с обычным уровнем, формат)
+ANOMALY_METRICS = {
+    "cpu": ("CPU", 15, lambda v: f"{v:.0f}%"),
+    "iowait": ("iowait", 10, lambda v: f"{v:.0f}%"),
+    "disk_r": ("чтение диска", 4e6, lambda v: fmt_bytes(v) + "/с"),
+    "disk_w": ("запись на диск", 4e6, lambda v: fmt_bytes(v) + "/с"),
+    "net_rx": ("входящий трафик", 4e6, lambda v: f"{v * 8 / 1e6:.0f} Мбит/с"),
+    "net_tx": ("исходящий трафик", 4e6, lambda v: f"{v * 8 / 1e6:.0f} Мбит/с"),
+}
+ANOMALY = {"ts": 0, "items": []}
+
+
+def anomalies(factor):
+    """Метрики хостов, которые последние 15 минут в factor раз выше обычного для этого часа
+    (среднее за тот же час ±1 ч в прошлые дни, нужно хотя бы 2 дня истории). Кэш на 5 минут."""
+    now = int(time.time())
+    if not factor:
+        return []
+    if now - ANOMALY["ts"] < 300:
+        return ANOMALY["items"]
+    items = []
+    names = ",".join(f"'{m}'" for m in ANOMALY_METRICS)
+    cur = {(h, m): v for h, m, v in S.q(f"SELECT host, metric, AVG(v) FROM raw WHERE ts > ? AND metric IN ({names}) "
+                                         f"AND host NOT LIKE '\\_%' ESCAPE '\\' GROUP BY host, metric", (now - 900,))}
+    tz = time.localtime(now).tm_gmtoff
+    hour = (now + tz) % 86400 // 3600
+    hours = {(hour + d) % 24 for d in (-1, 0, 1)}
+    base = {}
+    for h, m, ts, v in S.q(f"SELECT host, metric, ts, v FROM roll WHERE ts > ? AND ts < ? AND metric IN ({names})",
+                           (now - 8 * 86400, now - 6 * 3600)):
+        if (ts + tz) % 86400 // 3600 in hours:
+            b = base.setdefault((h, m), {"sum": 0.0, "n": 0, "days": set()})
+            b["sum"] += v
+            b["n"] += 1
+            b["days"].add((ts + tz) // 86400)
+    for (h, m), v in cur.items():
+        b = base.get((h, m))
+        if not b or len(b["days"]) < 2 or v is None:
+            continue
+        avg = b["sum"] / b["n"]
+        label, floor, f = ANOMALY_METRICS[m]
+        if v > factor * avg and v - avg > floor:
+            items.append({"host": h, "metric": m, "value": v, "usual": avg,
+                          "msg": f"{h}: {label} намного выше обычного — {f(v)}, обычно в это время {f(avg)}"})
+    ANOMALY.update(ts=now, items=items)
+    return items
+
+
+def uptime(days):
+    """Доступность каждой проверки сервиса по дням (доля успешных проверок)."""
+    now = int(time.time())
+    tz = time.localtime(now).tm_gmtoff
+    start = now - days * 86400
+    start -= (start + tz) % 86400  # с начала суток
+    out = {}
+    for name, day, avg, n in S.q("SELECT metric, (ts + ?) / 86400, AVG(v), COUNT(*) FROM roll WHERE host='_chk_ok' "
+                                 "AND ts >= ? GROUP BY metric, (ts + ?) / 86400", (tz, start, tz)):
+        out.setdefault(name, {})[day] = (avg, n)
+    today = (now + tz) // 86400
+    res = {}
+    for name, per in out.items():
+        tot = sum(a * n for a, n in per.values()) / max(1, sum(n for _, n in per.values()))
+        res[name] = {"total": round(100 * tot, 3),
+                     "days": [[(d * 86400 - tz), round(100 * per[d][0], 2) if d in per else None]
+                              for d in range(today - days + 1, today + 1)]}
+    return res
+
+
+# ---------------------------------------------------------------- telegram
+
 def tg_env():
     env = {}
     try:
@@ -392,10 +481,11 @@ class Alerts:
             return True
         kind, _, rest = key.partition(":")
         if scope.startswith("host:"):
-            return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc", "net", "logs", "smart") and \
+            return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc", "net", "logs", "smart",
+                            "iowait", "anom", "agent", "clock") and \
                 rest.split(":")[0] == scope[5:]
         kinds = {"ceph": ("ceph",), "patroni": ("pg", "etcd", "etcdlat", "pgdb"), "checks": ("chk", "cert"),
-                 "backups": ("bk",), "ssh": ("ssh",)}
+                 "backups": ("bk", "pbs"), "ssh": ("ssh",)}
         return kind in kinds.get(scope, ())
 
     def silenced(self, key):
@@ -461,6 +551,18 @@ class Alerts:
             if m.get("net_util", 0) > r["net_util_pct"]:
                 found[f"net:{name}"] = ("warn", f"{name}: сеть загружена на {m['net_util']:.0f}% "
                                                 f"(канал {m.get('link_mbit', '?')} Мбит/с)", r["net_for_sec"])
+            if m.get("iowait", 0) > r["iowait_pct"]:
+                found[f"iowait:{name}"] = ("warn", f"{name}: ожидание диска (iowait) {m['iowait']:.0f}%",
+                                           r["iowait_for_sec"])
+            if m.get("agent_cpu", 0) > r["agent_cpu_pct"] or m.get("agent_io", 0) > r["agent_io_kbs"] * 1024:
+                found[f"agent:{name}"] = ("warn", f"{name}: агент Lumen тратит CPU {m.get('agent_cpu', 0):.0f}%, "
+                                                  f"диск {fmt_bytes(m.get('agent_io') or 0)}/с", 600)
+            ck = lt.get("clock") or {}
+            if ck.get("sync") is False:
+                found[f"clock:{name}:sync"] = ("warn", f"{name}: время не синхронизировано (NTP)", 600)
+            skew = max(abs(ck.get("skew_ms") or 0), abs(ck.get("offset_ms") or 0))
+            if skew > r["clock_skew_ms"]:
+                found[f"clock:{name}"] = ("warn", f"{name}: часы расходятся на {skew:.0f} мс", 120)
             if m.get("log_err", 0) > r["log_err_per_min"]:
                 found[f"logs:{name}"] = ("warn", f"{name}: {m['log_err']:.0f} ошибок в журнале в минуту",
                                          r["log_for_sec"])
@@ -469,6 +571,9 @@ class Alerts:
                 if pct > r["disk_warn_pct"]:
                     lvl = "crit" if pct > r["disk_crit_pct"] else "warn"
                     found[f"disk:{name}:{d['mount']}"] = (lvl, f"{name}: диск {d['mount']} {pct:.0f}%", 0)
+
+        for a in anomalies(r["anomaly_factor"]):
+            found[f"anom:{a['host']}:{a['metric']}"] = ("warn", a["msg"], 0)
 
         for f in forecasts():
             if f["days"] is not None and f["days"] < r["forecast_days"]:
@@ -569,6 +674,21 @@ class Alerts:
                     name = next((g["name"] for g in pv["guests"] if str(g["vmid"]) == vmid), vmid)
                     event("info", f"{vmid} {name}: {prev[vmid]} → {st}")
             S.meta_set("guest_status", cur)
+
+        if "pbs" in cl and now - cl["pbs"][0] <= 3 * 3600:
+            for st in cl["pbs"][1].get("stores", []):
+                n = st["name"]
+                gc = st.get("gc") or {}
+                if gc.get("state") and gc["state"] != "OK":
+                    found[f"pbs:{n}:gc"] = ("warn", f"PBS {n}: очистка (GC) завершилась: {gc['state']}", 0)
+                elif gc.get("last") and now - gc["last"] > r["pbs_gc_days"] * 86400:
+                    found[f"pbs:{n}:gc"] = ("warn", f"PBS {n}: очистка (GC) не проходила {fmt_dur(now - gc['last'])}", 0)
+                for kind, label, limit in (("verify", "проверка (verify)", r["pbs_verify_days"]), ("prune", "прореживание", 3)):
+                    t = st.get(kind)
+                    if t and t.get("status") not in (None, "OK"):
+                        found[f"pbs:{n}:{kind}"] = ("warn", f"PBS {n}: {label} завершилось: {t['status']}", 0)
+                    elif t and now - t["end"] > limit * 86400:
+                        found[f"pbs:{n}:{kind}"] = ("warn", f"PBS {n}: {label} не проходила {fmt_dur(now - t['end'])}", 0)
 
         if "backups" in cl:
             ts, bk = cl["backups"]
@@ -856,6 +976,25 @@ def weekly_report():
         tasks = [t for t in c["backups"].get("tasks", []) if t["starttime"] > week]
         bad = [t for t in tasks if t.get("status") not in (None, "OK")]
         out.append(f"Бэкапы: заданий {len(tasks)}, с ошибкой {len(bad)}")
+    upd = [(k[8:], json.loads(v)) for k, v in S.q("SELECT kind, data FROM cluster WHERE kind LIKE 'updates:%' "
+                                                     "ORDER BY kind")]
+    if upd:
+        need = [f"{h} {u['count']}" + (f" (безопасность {u['security']})" if u.get("security") else "")
+                for h, u in upd if u.get("count")]
+        boot = [h for h, u in upd if u.get("reboot")]
+        out.append("Обновления: " + (", ".join(need) if need else "всё обновлено")
+                   + (f"; ждут перезагрузки: {', '.join(boot)}" if boot else ""))
+    pb = S.q("SELECT data FROM cluster WHERE kind='pbs'")
+    if pb:
+        for st in json.loads(pb[0][0]).get("stores", []):
+            out.append(f"PBS {st['name']}: занято {100 * st['used'] / st['size']:.0f}% ({fmt_bytes(st['used'])} "
+                       f"из {fmt_bytes(st['size'])}), GC {(st.get('gc') or {}).get('state') or '—'}, "
+                       f"verify {(st.get('verify') or {}).get('status') or 'не было'}")
+    ut = uptime(7)
+    bad = [(n, u["total"]) for n, u in ut.items() if u["total"] < 99.9]
+    if ut:
+        out.append("Сервисы: " + ("все доступны ≥ 99.9%" if not bad else
+                                  "ниже 99.9%: " + ", ".join(f"{n} {p:.2f}%" for n, p in sorted(bad, key=lambda x: x[1]))))
     (unk,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ? AND known=0", (week,))
     (tot,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ?", (week,))
     out.append(f"Входы по SSH: {tot}" + (f", с незнакомых адресов {unk}" if unk else ", все с известных адресов"))
@@ -1356,6 +1495,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/metrics":
                 rows = S.q("SELECT DISTINCT metric FROM raw WHERE host=? AND ts>?", (qs["host"], now - 3600))
                 return self.send(200, sorted(r[0] for r in rows))
+            if u.path == "/api/uptime":
+                return self.send(200, uptime(min(int(qs.get("days", 30)), CFG["rollup_keep_days"])))
             if u.path == "/api/alerts/history":
                 return self.send(200, alert_history(min(int(qs.get("days", 7)), CFG["rollup_keep_days"])))
             if u.path == "/api/settings":

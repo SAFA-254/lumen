@@ -121,6 +121,12 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 .two .bar{margin-top:4px;width:110px}
 .logmsg{font-family:var(--mono,ui-monospace,monospace);font-size:12px;white-space:normal;word-break:break-word;color:var(--text)}
 .wear{display:inline-flex;align-items:center;gap:6px}.wear .bar{width:54px}
+.upd{color:var(--info,#5b8def);font-weight:500}.upd.boot{color:var(--warn)}
+.ptable td{font-size:12.5px}.ptable .cmd{max-width:460px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-family:ui-monospace,monospace;font-size:11.5px}
+.ubars{display:flex;gap:2px;align-items:flex-end;height:26px}
+.ubars i{flex:1;min-width:3px;height:100%;border-radius:2px;background:var(--ok)}
+.ubars i.warn{background:var(--warn)}.ubars i.crit{background:var(--crit)}.ubars i.none{background:var(--surface2);box-shadow:inset 0 0 0 1px var(--line)}
+.urow{display:grid;grid-template-columns:170px 1fr 70px;gap:14px;align-items:center;padding:8px 16px;border-top:1px solid var(--line);font-size:13px}
 .hl{display:none;font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
 
 /* guests */
@@ -513,6 +519,13 @@ function renderKpis(d) {
   document.querySelectorAll(".kpi").forEach(k => k.onclick = () => scrollTo(k.dataset.to));
 }
 
+function updText(u) {
+  if (!u) return "";
+  const tip = u.count ? `Ждут обновления: ${u.packages.join(", ")}${u.count > u.packages.length ? " …" : ""}` : "";
+  return (u.count ? ` · <span class="upd" title="${esc(tip)}">⟳ ${u.count}${u.security ? ` (${u.security} безоп.)` : ""}</span>` : "")
+    + (u.reboot ? ` · <span class="upd boot" title="${esc(u.reason)}">нужна перезагрузка</span>` : "");
+}
+
 function renderHosts(d) {
   $("#hosts-meta").textContent = "нажми на строку, чтобы открыть графики";
   if (!d.hosts.length) { $("#hosts").innerHTML = `<div class="empty">Агенты ещё не прислали данные</div>`; return; }
@@ -530,7 +543,7 @@ function renderHosts(d) {
     return `<div class="hrow ${st == "off" ? "down" : ""}" data-host="${esc(h.name)}">
       <div class="hname"><span class="dot ${st == "ok" ? "" : st}"></span><div style="min-width:0">
         <b>${esc(h.name)}</b>${silenced ? " 🔕" : ""}
-        <div class="sub">${st == "off" ? "нет связи " + fmt.ago(h.age) : `${i.cpus ?? "?"} vCPU · ${fmt.bytes(m.mem_total)} · up ${fmt.short(i.uptime || 0)}`}</div></div></div>
+        <div class="sub">${st == "off" ? "нет связи " + fmt.ago(h.age) : `${i.cpus ?? "?"} vCPU · ${fmt.bytes(m.mem_total)} · up ${fmt.short(i.uptime || 0)}`}${updText(d.cluster["updates:" + h.name])}</div></div></div>
       <div><div class="hl">CPU</div><div class="mc"><span class="v">${fmt.pct(m.cpu)}<small>%</small></span>${spark(h.spark.cpu, lvColor(cpuLv))}</div></div>
       <div><div class="hl">Память</div><div class="mc"><span class="v">${fmt.pct(m.mem)}<small>%</small></span>${spark(h.spark.mem, memLv ? lvColor(memLv) : css("--c2"), 20)}</div></div>
       <div class="dk" title="${esc(tip)}">
@@ -670,9 +683,18 @@ function renderBackups(b, pv) {
   const tasks = b.tasks.slice(0, 4).map(t => `<div class="ev"><time class="num">${fmt.time(t.starttime, true).split(" ")[0]}</time>
       <span class="dot ${t.status == "OK" ? "" : t.status ? "crit" : "warn"}"></span>
       <span>${esc(t.node)} · ${t.status == "OK" ? "успешно" : t.status ? `<span style="color:var(--crit)">${esc(t.status)}</span>` : "идёт…"} <span class="faint">${t.endtime ? "· " + fmt.dur(t.endtime - t.starttime) : ""}</span></span></div>`).join("");
+  const pbs = (DATA.cluster.pbs?.stores || []).map(st => {
+    const pct = 100 * st.used / st.size, gc = st.gc || {};
+    const job = (label, t, sched) => `<div class="li"><span class="dot ${!t ? "off" : t.status == "OK" ? "" : "crit"}"></span><span>${label}</span>
+      <span class="end num muted">${t ? `${t.status == "OK" ? "успешно" : `<span style="color:var(--crit)">${esc(t.status)}</span>`} · ${fmt.ago(now - t.end)}` : "не было"}${sched ? ` · <span class="faint">${esc(sched)}</span>` : ""}</span></div>`;
+    return `<div class="sub-h">PBS · ${esc(st.name)}</div>
+      <div class="pb" style="padding-top:4px;padding-bottom:8px"><div class="dk"><div class="v"><span>занято ${fmt.bytes(st.used)} из ${fmt.bytes(st.size)}</span><span class="num">${pct.toFixed(0)}%</span></div>${bar(pct, 85, 95)}</div>
+      ${gc.index_bytes && gc.disk_bytes ? `<div class="faint" style="font-size:11.5px;margin-top:6px">дедупликация ×${(gc.index_bytes / gc.disk_bytes).toFixed(1)}: ${fmt.bytes(gc.index_bytes)} копий занимают ${fmt.bytes(gc.disk_bytes)}</div>` : ""}</div>
+      <div class="list">${job("Очистка (GC)", gc.last ? {status: gc.state, end: gc.last} : null, gc.schedule)}${job("Прореживание", st.prune)}${job("Проверка (verify)", st.verify, st.verify_schedule)}</div>`;
+  }).join("");
   el.innerHTML = panelHead("Бэкапы", `<span class="badge mute">${esc(b.storage)}</span>`, fmt.ago(b._age)) +
     `<div class="list" style="padding:4px 0">${rows || `<div class="empty">нет копий</div>`}</div>
-     <div class="sub-h">Задания vzdump</div><div style="padding-bottom:6px">${tasks || `<div class="empty">нет</div>`}</div>`;
+     <div class="sub-h">Задания vzdump</div><div style="padding-bottom:6px">${tasks || `<div class="empty">нет</div>`}</div>${pbs}`;
 }
 
 const SMART_LABELS = {realloc: "переназначено", pending: "ждут переназн.", uncorrectable: "нечитаемых", reported_uncorrect: "неисправл.", crc: "CRC"};
@@ -842,11 +864,13 @@ async function drawHost() {
       <div class="stat"><div class="l">Прогноз диска</div><div class="v num" style="font-size:13px">${fc.length ? fc.map(f => `${esc(f.target)}: ${fcText(f)}`).join("<br>") : "мало истории"}</div></div>
     </div>
     <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ["disk", m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"],
-        ...(m.net_util != null ? [["netu", `Загрузка канала ${m.link_mbit} Мбит/с`]] : []), ...(m.log_err != null ? [["logs", "Ошибки в журнале, в минуту"]] : [])]
+        ...(m.net_util != null ? [["netu", `Загрузка канала ${m.link_mbit} Мбит/с`]] : []), ...(m.log_err != null ? [["logs", "Ошибки в журнале, в минуту"]] : []),
+        ...(m.agent_cpu != null ? [["agent", "Агент Lumen: CPU и диск"]] : [])]
         .map(([id, t]) => chartBox(id, t)).join("")}</div>${hostExtras(name)}`;
   bindDrawer();
+  bindProcs(name);
   CHARTS = [];
-  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", "net_util", "log_err", ...disks];
+  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", "net_util", "log_err", "agent_cpu", "agent_io", ...disks];
   const r = await getJSON(`api/history?host=${encodeURIComponent(name)}&${rangeQS()}&scope=${encodeURIComponent("host:" + name)}&metrics=${encodeURIComponent(metrics.join(","))}`);
   if (OPEN != name) return;
   const S = (key, label, color, fill) => ({name: label, color, fill, points: r[key]?.points || [], step: r[key]?.step});
@@ -860,10 +884,36 @@ async function drawHost() {
   drawSeries("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
   if (m.net_util != null) drawSeries("netu", [S("net_util", "занято канала", C[2], true)], pct);
   if (m.log_err != null) drawSeries("logs", [S("log_err", "ошибок в минуту", C[3], true)], {fmt: v => v.toFixed(1), minMax: 1, ann});
+  if (m.agent_cpu != null) drawSeries("agent", [S("agent_cpu", "CPU, %", C[0], true)], {fmt: v => v.toFixed(1) + "%", minMax: 2, ann});
+}
+let PSORT = "cpu";
+function procTable(name) {
+  const pr = DATA.cluster["procs:" + name];
+  if (!pr) return "";
+  const key = {cpu: r => r.cpu, mem: r => r.rss, io: r => (r.rd || 0) + (r.wr || 0)}[PSORT];
+  const rows = [...pr.top].sort((a, b) => key(b) - key(a)).slice(0, 10);
+  const tabs = [["cpu", "CPU"], ["mem", "память"], ["io", "диск"]].map(([k, l]) => `<button data-ps="${k}" class="${k == PSORT ? "on" : ""}">${l}</button>`).join("");
+  return panelHead("Процессы", `<div class="filters">${tabs}</div>`, `всего ${pr.count} · за ${pr.window} с · ${fmt.ago(pr._age)}`) +
+    `<div class="tbl"><table class="ptable"><tr><th>PID</th><th>Процесс</th><th class="r">CPU</th><th class="r">Память</th><th class="r">Чтение</th><th class="r">Запись</th><th>Команда</th></tr>${rows.map(r => `<tr>
+      <td class="faint num">${r.pid}</td><td><b style="font-weight:600">${esc(r.name)}</b></td>
+      <td class="r num" style="color:${r.cpu > 50 ? "var(--warn)" : ""}">${r.cpu.toFixed(1)}%</td><td class="r num">${fmt.bytes(r.rss)}</td>
+      <td class="r num muted">${r.rd != null ? fmt.rate(r.rd) : "—"}</td><td class="r num muted">${r.wr != null ? fmt.rate(r.wr) : "—"}</td>
+      <td class="cmd" title="${esc(r.cmd)}">${esc(r.cmd)}</td></tr>`).join("")}</table></div>`;
+}
+function bindProcs(name) {
+  document.querySelectorAll("[data-ps]").forEach(b => b.onclick = () => { PSORT = b.dataset.ps; $("#procs-box").innerHTML = procTable(name); bindProcs(name); });
 }
 function hostExtras(name) {
-  const sm = DATA.cluster["smart:" + name], lg = DATA.cluster["logs:" + name];
-  let out = "";
+  const sm = DATA.cluster["smart:" + name], lg = DATA.cluster["logs:" + name], up = DATA.cluster["updates:" + name];
+  const h = DATA.hosts.find(x => x.name == name), m = h.metrics || {}, ck = h.clock || {};
+  const skew = Math.max(Math.abs(ck.skew_ms || 0), Math.abs(ck.offset_ms || 0));
+  let out = `<div class="info-grid" style="margin-top:12px">
+    <div class="stat"><div class="l">Агент Lumen</div><div class="v num" style="font-size:13px">CPU ${m.agent_cpu != null ? m.agent_cpu.toFixed(1) + "%" : "—"} · ${fmt.bytes(m.agent_mem)}<br><span class="muted">диск ${fmt.rate(m.agent_io || 0)}</span></div></div>
+    <div class="stat"><div class="l">Время</div><div class="v num" style="font-size:13px">${ck.sync === false ? `<span style="color:var(--warn)">не синхронизировано</span>` : ck.sync ? "синхронизировано" : "—"}<br><span class="muted">${ck.offset_ms != null ? `chrony ${ck.offset_ms} мс` : ""}${ck.skew_ms != null ? `${ck.offset_ms != null ? " · " : ""}<span title="разница с часами сервера Lumen, включая время в пути">к Lumen ${ck.skew_ms > 0 ? "+" : ""}${ck.skew_ms} мс</span>` : ""}</span></div></div>
+    <div class="stat"><div class="l">Обновления</div><div class="v num" style="font-size:13px">${up ? (up.count ? `${up.count} пакетов${up.security ? `, безопасности ${up.security}` : ""}` : "всё обновлено") : "—"}<br><span class="muted" style="${up?.reboot ? "color:var(--warn)" : ""}">${up ? (up.reboot ? "нужна перезагрузка" : "перезагрузка не нужна") : ""}</span></div></div>
+    <div class="stat"><div class="l">Процессов</div><div class="v num">${DATA.cluster["procs:" + name]?.count ?? "—"}</div></div>
+  </div>`;
+  if (DATA.cluster["procs:" + name]) out += `<div class="panel" id="procs-box" style="margin-top:12px">${procTable(name)}</div>`;
   if (sm?.disks?.length) out += `<div class="panel" style="margin-top:12px">${panelHead("Диски (SMART)", "", fmt.ago(sm._age))}<div class="tbl"><table>${smartHead(false)}${smartRows(sm.disks, false)}</table></div></div>`;
   if (lg) out += `<div class="panel" style="margin-top:12px">${panelHead("Частые ошибки в журнале", lg.hour ? `<span class="badge warn">${lg.hour} за час</span>` : "", "последний час")}${lg.top?.length ? `<div style="padding-bottom:6px">${logList(lg.top, DATA.now, false)}</div>` : `<div class="empty">ошибок нет</div>`}</div>`;
   return out;
@@ -882,10 +932,10 @@ async function drawVM(vmid) {
       <div class="stat"><div class="l">Диск</div><div class="v num">${g.maxdisk ? (g.disk ? fmt.bytes(g.disk) + " / " : "") + fmt.bytes(g.maxdisk) : "—"}</div></div>
       <div class="stat"><div class="l">Сеть сейчас</div><div class="v num" style="font-size:13px">${run && g.net_rx != null ? `↓ ${fmt.bits(g.net_rx)}<br>↑ ${fmt.bits(g.net_tx)}` : "—"}</div></div>
     </div>
-    <div class="charts">${chartBox("cpu", "CPU (от выделенных ядер)")}${chartBox("mem", "Память")}${chartBox("net", "Сеть")}${chartBox("io", "Диск I/O")}</div>`;
+    <div class="charts">${chartBox("cpu", "CPU (от выделенных ядер)")}${chartBox("mem", "Память")}${chartBox("net", "Сеть")}${chartBox("io", "Диск I/O")}${chartBox("lat", "Задержка диска в Ceph", true)}</div>`;
   bindDrawer();
   CHARTS = [];
-  const r = await getJSON(`api/history?host=_vm${vmid}&${rangeQS()}&metrics=cpu,mem,net_rx,net_tx,disk_r,disk_w`);
+  const r = await getJSON(`api/history?host=_vm${vmid}&${rangeQS()}&metrics=cpu,mem,net_rx,net_tx,disk_r,disk_w,rd_lat,wr_lat`);
   if (OPEN != key) return;
   const S = (k, label, color, fill) => ({name: label, color, fill, points: r[k]?.points || [], step: r[k]?.step});
   const C = PAL();
@@ -893,6 +943,7 @@ async function drawVM(vmid) {
   drawSeries("mem", [S("mem", "память", C[1], true)], {max: 100, fmt: v => v.toFixed(0) + "%"});
   drawSeries("net", [S("net_rx", "вход", C[2], true), S("net_tx", "выход", C[0])], {fmt: fmt.bits});
   drawSeries("io", [S("disk_r", "чтение", C[0], true), S("disk_w", "запись", C[3])], {fmt: fmt.rate});
+  drawSeries("lat", [S("wr_lat", "запись", C[3], true), S("rd_lat", "чтение", C[0])], {fmt: v => v.toFixed(1) + " мс", minMax: 5});
 }
 
 const CLUSTER = {
@@ -922,8 +973,11 @@ async function drawCluster(kind) {
   const charts = cfg.charts.filter(c => !c.pg || pgHosts.length);
   $("#drawer-in").innerHTML = `
     <div class="drawer-h"><h3>${esc(cfg.title)}</h3><span class="spacer"></span>${rangeBtns()}</div>
-    <div class="charts">${charts.map(c => chartBox(c.id, c.title, c.wide)).join("")}</div>`;
+    ${kind == "checks" ? `<div class="panel" id="uptime-box" style="margin-bottom:12px"><div class="empty">загрузка…</div></div>` : ""}
+    <div class="charts">${charts.map(c => chartBox(c.id, c.title, c.wide)).join("")}</div>${kind == "ceph" ? rbdTable() : ""}`;
   bindDrawer();
+  if (kind == "checks") drawUptime();
+  document.querySelectorAll("#drawer-in tr[data-vm]").forEach(r => { if (r.dataset.vm) r.onclick = () => openDrawer("@vm:" + r.dataset.vm); });
   CHARTS = [];
   const names = await getJSON(`api/metrics?host=${cfg.groups[0]}`);
   const r = names.length ? await getJSON(`api/history?host=${cfg.groups[0]}&${rangeQS()}&scope=${kind}&metrics=${encodeURIComponent(names.join(","))}`) : {};
@@ -940,6 +994,30 @@ async function drawCluster(kind) {
     }
     drawSeries(c.id, series, {fmt: c.fmt, ann: r._annotations, max: c.max, minMax: c.minMax});
   }
+}
+
+function rbdTable() {
+  const imgs = DATA.cluster.ceph?.images;
+  if (!imgs?.length) return "";
+  const names = Object.fromEntries((DATA.cluster.pve?.guests || []).map(g => [g.vmid, g.name]));
+  const rows = [...imgs].sort((a, b) => (b.rd + b.wr) - (a.rd + a.wr));
+  const lat = v => `<span style="color:${v > 100 ? "var(--crit)" : v > 30 ? "var(--warn)" : ""}">${v.toFixed(1)} мс</span>`;
+  return `<div class="panel" style="margin-top:12px">${panelHead("Нагрузка на Ceph по дискам VM", "", "за последние ~30 с")}
+    <div class="tbl"><table><tr><th>Диск</th><th>Гость</th><th class="r">Чтение</th><th class="r">Запись</th><th class="r">Операций/с</th><th class="r">Задержка чтения</th><th class="r">Задержка записи</th></tr>
+    ${rows.map(i => `<tr class="${i.vmid != null ? "click" : ""}" data-vm="${i.vmid ?? ""}"><td class="muted">${esc(i.pool)}/${esc(i.image)}</td><td><b style="font-weight:600">${esc(names[i.vmid] || "")}</b> <span class="faint">${i.vmid ?? ""}</span></td>
+      <td class="r num">${fmt.rate(i.rd)}</td><td class="r num">${fmt.rate(i.wr)}</td><td class="r num muted">${(i.rd_ops + i.wr_ops).toFixed(0)}</td>
+      <td class="r num">${i.rd_ops ? lat(i.rd_lat) : "—"}</td><td class="r num">${i.wr_ops ? lat(i.wr_lat) : "—"}</td></tr>`).join("")}</table></div></div>`;
+}
+async function drawUptime() {
+  const u = await getJSON("api/uptime?days=30");
+  if (OPEN != "@checks") return;
+  const names = Object.keys(u).sort();
+  const lv = p => p == null ? "none" : p >= 99.9 ? "" : p >= 99 ? "warn" : "crit";
+  $("#uptime-box").innerHTML = panelHead("Доступность за 30 дней", "", "каждая полоска — сутки") + (names.length ? names.map(n => `<div class="urow">
+    <b style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</b>
+    <div class="ubars">${u[n].days.map(([d, p]) => `<i class="${lv(p)}" title="${esc(new Date(d * 1000).toLocaleDateString("ru-RU") + ": " + (p == null ? "нет данных" : p.toFixed(2) + "%"))}"></i>`).join("")}</div>
+    <span class="r num" style="text-align:right;color:${u[n].total < 99 ? "var(--crit)" : u[n].total < 99.9 ? "var(--warn)" : ""}">${u[n].total.toFixed(2)}%</span></div>`).join("")
+    : `<div class="empty">Данные о доступности копятся с момента обновления агента — первые полоски появятся через несколько минут</div>`);
 }
 
 /* --------------------------------------------------------------- alert history */

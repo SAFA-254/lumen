@@ -6,11 +6,13 @@ import json
 import os
 import platform
 import re
+import resource
 import socket
 import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +36,10 @@ CFG = {
     "ssh_interval": 60,
     "pg_interval": 30,
     "smart_interval": 1800,
+    "procs_interval": 60,
+    "updates_interval": 21600,
+    "pbs_interval": 600,
+    "clock_interval": 300,
     "ca_file": "",            # сертификат сервера Lumen для проверки HTTPS
 }
 if os.path.exists(CONFIG_PATH):
@@ -226,6 +232,35 @@ def info():
     }
 
 
+CLK_TCK = os.sysconf("SC_CLK_TCK")
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+SELF = {}
+
+
+def self_usage(now):
+    """Сколько ресурсов тратит сам агент вместе с запускаемыми командами (journalctl, smartctl, pvesh…)."""
+    t = os.times()
+    cpu_s = t.user + t.system + t.children_user + t.children_system
+    ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+    io = (ru.ru_inblock + ru.ru_oublock) * 512
+    try:
+        f = dict(l.split(": ") for l in read("/proc/self/io").splitlines())
+        io += int(f["read_bytes"]) + int(f["write_bytes"])
+    except (OSError, KeyError, ValueError):
+        pass
+    # считаем за минуту: команды модулей (pvesh, ceph) запускаются раз в минуту, за 15 с выходили бы пики
+    p = SELF.get("prev")
+    if not p or now - p[0] >= 60:
+        if p and now > p[0]:
+            SELF["cpu"] = round(100.0 * (cpu_s - p[1]) / (now - p[0]), 2)
+            SELF["io"] = max(0.0, (io - p[2]) / (now - p[0]))
+        SELF["prev"] = (now, cpu_s, io)
+    return {"agent_cpu": SELF.get("cpu"), "agent_io": SELF.get("io"),
+            "agent_mem": int(read("/proc/self/statm").split()[1]) * PAGE}
+
+
 def system(now):
     c, io = cpu()
     mt, mu, st, su = memory()
@@ -242,7 +277,59 @@ def system(now):
         "disk_r": dr, "disk_w": dw,
         "temp": temperature(),
     }
+    m.update(self_usage(now))
     return {k: v for k, v in m.items() if v is not None}
+
+
+def proc_sample():
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            st = read(f"/proc/{pid}/stat")
+            comm = st[st.index("(") + 1:st.rindex(")")]
+            f = st[st.rindex(")") + 2:].split()
+            ticks = int(f[11]) + int(f[12])
+            rss = int(f[21]) * PAGE
+            io = None
+            try:
+                d = dict(l.split(": ") for l in read(f"/proc/{pid}/io").splitlines())
+                io = (int(d["read_bytes"]), int(d["write_bytes"]))
+            except (OSError, KeyError, ValueError):
+                pass
+            cmd = read(f"/proc/{pid}/cmdline").replace("\0", " ").strip()[:160] or f"[{comm}]"
+        except (OSError, ValueError, IndexError):
+            continue
+        out[pid] = (comm, cmd, ticks, rss, io)
+    return out
+
+
+PROCS = {"prev": None, "ts": 0}
+
+
+def mod_procs():
+    """Самые тяжёлые процессы по CPU, памяти и диску за последний интервал."""
+    now, cur = time.time(), proc_sample()
+    prev, dt = PROCS["prev"], now - PROCS["ts"]
+    PROCS.update(prev=cur, ts=now)
+    if not prev or dt <= 0:
+        return None
+    rows = []
+    for pid, (comm, cmd, ticks, rss, io) in cur.items():
+        p = prev.get(pid)
+        if not p or p[0] != comm:
+            continue
+        cpu = 100.0 * (ticks - p[2]) / CLK_TCK / dt
+        rd = wr = None
+        if io and p[4]:
+            rd, wr = (io[0] - p[4][0]) / dt, (io[1] - p[4][1]) / dt
+        rows.append({"pid": int(pid), "name": comm, "cmd": cmd, "cpu": round(cpu, 1), "rss": rss,
+                     "rd": rd, "wr": wr})
+    pick = lambda key, n: sorted(rows, key=key, reverse=True)[:n]
+    top = {r["pid"]: r for r in pick(lambda r: r["cpu"], 8) + pick(lambda r: r["rss"], 5)
+           + pick(lambda r: (r["rd"] or 0) + (r["wr"] or 0), 5)}
+    return {"count": len(cur), "window": round(dt), "top": list(top.values())}
 
 
 # ---------------------------------------------------------------- cluster modules
@@ -281,7 +368,41 @@ def mod_pve():
     return {"nodes": nodes, "guests": guests, "storage": uniq}
 
 
+RBD = {"images": [], "ts": 0, "thread": None}
+
+
+def rbd_loop():
+    """`rbd perf image iostat` собирает статистику ~10 с, поэтому работает в отдельном потоке."""
+    while True:
+        try:
+            pools = [p["pool_name"] for p in run_json(["ceph", "osd", "pool", "ls", "detail", "-f", "json"], timeout=20)
+                     if "rbd" in (p.get("application_metadata") or {})]
+            images = []
+            for pool in pools:
+                # по пулу без образов iostat ждёт статистику бесконечно
+                if not subprocess.run(["rbd", "ls", pool], capture_output=True, text=True, timeout=20).stdout.strip():
+                    continue
+                try:
+                    out = subprocess.run(["rbd", "perf", "image", "iostat", "--iterations", "1", "--format", "json",
+                                          pool], capture_output=True, text=True, timeout=30).stdout
+                except subprocess.TimeoutExpired:
+                    continue
+                for i in json.loads(out or "[]"):
+                    m = re.match(r"(?:vm|base)-(\d+)-", i["image"])
+                    images.append({"pool": pool, "image": i["image"], "vmid": int(m.group(1)) if m else None,
+                                   "rd": i["read_bytes"], "wr": i["write_bytes"], "rd_ops": i["read_ops"],
+                                   "wr_ops": i["write_ops"], "rd_lat": round(i["read_latency"] / 1e6, 2),
+                                   "wr_lat": round(i["write_latency"] / 1e6, 2)})
+            RBD.update(images=images, ts=time.time())
+        except Exception as e:
+            print(f"rbd stats: {e!r}", file=sys.stderr, flush=True)
+        time.sleep(50)
+
+
 def mod_ceph():
+    if RBD["thread"] is None:
+        RBD["thread"] = threading.Thread(target=rbd_loop, daemon=True)
+        RBD["thread"].start()
     s = run_json(["ceph", "status", "-f", "json"], timeout=20)
     df = run_json(["ceph", "df", "-f", "json"], timeout=20)
     perf = run_json(["ceph", "osd", "perf", "-f", "json"], timeout=20)
@@ -310,6 +431,11 @@ def mod_ceph():
     series("_ceph", dict(osd_lat, io_rd=io["rd"], io_wr=io["wr"], ops_rd=io["rd_ops"], ops_wr=io["wr_ops"],
                          used_pct=used_pct))
     out["osd_lat"] = osd_lat
+    if time.time() - RBD["ts"] < 180:
+        out["images"] = RBD["images"]
+        for i in RBD["images"]:
+            if i["vmid"] is not None and i["rd_ops"] + i["wr_ops"] > 0:
+                series(f"_vm{i['vmid']}", {k: i[k] for k in ("rd_lat", "wr_lat") if i[k.replace("lat", "ops")] > 0})
     return out
 
 
@@ -469,6 +595,7 @@ def mod_checks():
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(check_one, active_checks()))
     series("_checks", {r["name"]: r["ms"] for r in results if r["ok"]})
+    series("_chk_ok", {r["name"]: 1 if r["ok"] else 0 for r in results})
     return results
 
 
@@ -622,6 +749,81 @@ def mod_logs():
     return {"hour": sum(r["n"] for r in recent.values()), "top": top}
 
 
+def kernel_key(v):
+    return [int(x) if x.isdigit() else x for x in re.split(r"[.-]", v)]
+
+
+def mod_updates():
+    """Сколько пакетов ждёт обновления (по уже скачанным спискам, apt update не запускается)
+    и нужна ли перезагрузка."""
+    out = subprocess.run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "dist-upgrade"], capture_output=True,
+                         text=True, timeout=120, env=dict(os.environ, LANG="C")).stdout
+    inst = [l for l in out.splitlines() if l.startswith("Inst ")]
+    res = {"count": len(inst), "security": sum("security" in l.lower() for l in inst),
+           "packages": [l.split()[1] for l in inst][:40], "reboot": False, "reason": ""}
+    if os.path.exists("/var/run/reboot-required"):
+        res["reboot"] = True
+        try:
+            res["reason"] = ", ".join(read("/var/run/reboot-required.pkgs").split()[:5])
+        except OSError:
+            res["reason"] = "обновлены системные пакеты"
+    elif not CONTAINER:
+        running = platform.release()
+        kernels = [f[8:] for f in os.listdir("/boot") if f.startswith("vmlinuz-")]
+        if kernels:
+            newest = max(kernels, key=kernel_key)
+            if kernel_key(newest) > kernel_key(running):
+                res.update(reboot=True, reason=f"новое ядро {newest} (работает {running})")
+    return res
+
+
+def mod_pbs():
+    """Proxmox Backup Server на этом хосте: заполнение хранилищ, очистка (GC), прореживание, проверка."""
+    stores = run_json(["proxmox-backup-manager", "datastore", "list", "--output-format", "json"])
+    tasks = run_json(["proxmox-backup-manager", "task", "list", "--all", "--limit", "500", "--output-format", "json"],
+                     timeout=30)
+    verify_jobs = run_json(["proxmox-backup-manager", "verify-job", "list", "--output-format", "json"])
+    out = []
+    for d in stores:
+        name = d["name"]
+        st = os.statvfs(d["path"])
+        gc = run_json(["proxmox-backup-manager", "garbage-collection", "status", name, "--output-format", "json"])
+        last = {}
+        for t in tasks:
+            if t["worker_type"] in ("garbage_collection", "prunejob", "verificationjob", "verify", "prune") and \
+                    (t.get("worker_id") or "").split(":")[0] == name and t.get("endtime"):
+                kind = {"verify": "verificationjob", "prune": "prunejob"}.get(t["worker_type"], t["worker_type"])
+                if t["endtime"] > last.get(kind, {}).get("end", 0):
+                    last[kind] = {"end": t["endtime"], "status": t.get("status")}
+        out.append({"name": name, "size": st.f_blocks * st.f_frsize,
+                    "used": (st.f_blocks - st.f_bfree) * st.f_frsize,
+                    "gc": {"last": gc.get("last-run-endtime"), "state": gc.get("last-run-state"),
+                           "next": gc.get("next-run"), "schedule": gc.get("schedule") or d.get("gc-schedule"),
+                           "removed": gc.get("removed-bytes"), "pending": gc.get("pending-bytes"),
+                           "disk_bytes": gc.get("disk-bytes"), "index_bytes": gc.get("index-data-bytes")},
+                    "prune": last.get("prunejob"), "verify": last.get("verificationjob"),
+                    "verify_schedule": ", ".join(j.get("schedule", "") for j in verify_jobs if j.get("store") == name)})
+    return {"stores": out}
+
+
+def clock_state():
+    """Синхронизировано ли время и (если есть chrony) отклонение от источника."""
+    res = {}
+    try:
+        res["sync"] = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True,
+                                     text=True, timeout=10).stdout.strip() == "yes"
+    except Exception:
+        pass
+    try:
+        f = subprocess.run(["chronyc", "-c", "tracking"], capture_output=True, text=True, timeout=10).stdout.split(",")
+        if len(f) > 4:
+            res["offset_ms"] = round(float(f[4]) * 1000, 3)
+            res["source"] = f[1]
+    except Exception:
+        pass
+    return res
+
+
 PG_QUERY = """SELECT json_build_object(
   'version', current_setting('server_version'),
   'in_recovery', pg_is_in_recovery(),
@@ -674,14 +876,19 @@ MODULES = {
     "postgres": (mod_postgres, "pg_interval"),
     "smart": (mod_smart, "smart_interval"),
     "logs": (mod_logs, "interval"),
+    "procs": (mod_procs, "procs_interval"),
+    "updates": (mod_updates, "updates_interval"),
+    "pbs": (mod_pbs, "pbs_interval"),
 }
-CLUSTER_KEY = {"checks": "checks:{host}", "postgres": "postgres:{host}", "smart": "smart:{host}", "logs": "logs:{host}"}  # у каждого хоста свой ключ
+CLUSTER_KEY = {"checks": "checks:{host}", "postgres": "postgres:{host}", "smart": "smart:{host}", "logs": "logs:{host}",
+               "procs": "procs:{host}", "updates": "updates:{host}"}  # у каждого хоста свой ключ
 
 
 PUSH_CTX = ssl.create_default_context(cafile=CFG["ca_file"]) if CFG["ca_file"] else None
 
 
 def push(payload):
+    payload["sent"] = time.time()  # по нему сервер оценивает расхождение часов
     req = urllib.request.Request(CFG["server"].rstrip("/") + "/api/push",
                                  data=json.dumps(payload).encode(), method="POST",
                                  headers={"Content-Type": "application/json",
@@ -695,10 +902,13 @@ def main():
     last_run = {}
     system(time.time())  # первые значения счётчиков
     errors = 0
+    clock, clock_ts = {}, 0
     while True:
         t0 = time.time()
+        if t0 - clock_ts >= CFG["clock_interval"]:
+            clock, clock_ts = clock_state(), t0
         payload = {"host": CFG["host"], "ts": int(t0), "interval": CFG["interval"],
-                   "metrics": system(t0), "disks": disks(), "info": info(), "cluster": {}}
+                   "metrics": system(t0), "disks": disks(), "info": info(), "cluster": {}, "clock": clock}
         modules = list(CFG["modules"])
         if active_checks() and "checks" not in modules:
             modules.append("checks")  # сервер назначил этот хост выполнять проверки

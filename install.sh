@@ -9,7 +9,7 @@ CT_NODE=root@192.168.3.4   # pve2: там CT 101 и CT 108
 SERVER=https://192.168.3.7
 TOKEN=$(python3 -c 'import json;print(json.load(open("/etc/lumen/agent.json"))["token"])')
 # VM: vmid -> модули агента
-declare -A VM_MODULES=([104]='["system","ssh","logs"]' [105]='["system","ssh","logs","postgres"]' [106]='["system","ssh","logs","postgres"]')
+declare -A VM_MODULES=([104]='["system","ssh","logs","procs","updates"]' [105]='["system","ssh","logs","procs","updates","postgres"]' [106]='["system","ssh","logs","procs","updates","postgres"]')
 
 push_ct() { # ct файл-на-узле путь-в-ct [права]
   ssh $CT_NODE "pct push $1 $2 $3 ${4:+--perms $4}"
