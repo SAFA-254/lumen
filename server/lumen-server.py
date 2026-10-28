@@ -720,6 +720,7 @@ def morning_summary():
     # пробел у всех хостов, которые уже присылали данные: скорее всего не работал сам Lumen (или его узел)
     shared = [g for g in sorted({g for v in gaps.values() for g in v})
               if len(alive := [h for h in gaps if first[h] < g[0]]) >= 2 and all(same(g, gaps[h]) for h in alive)]
+    shared = [g for i, g in enumerate(shared) if not same(g, shared[:i])]  # у хостов начало отличается на секунды
     if shared:
         out.append("⚠️ Lumen не получал данных: " + "; ".join(span(a, b) for a, b in shared[:3]))
     for h, v in sorted(gaps.items()):
