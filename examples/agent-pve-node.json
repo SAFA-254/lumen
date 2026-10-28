@@ -1,7 +1,14 @@
 {
-  "server": "http://192.168.3.37:8095",
+  "server": "https://192.168.3.37",
   "token": "тот же, что в server.json",
   "host": "pve1",
-  "modules": ["system", "pve", "ceph", "backups"],
-  "backup_storage": "pbs"
+  "modules": [
+    "system",
+    "pve",
+    "ceph",
+    "backups",
+    "ssh"
+  ],
+  "backup_storage": "pbs",
+  "ca_file": "/etc/lumen/server.crt"
 }

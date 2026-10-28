@@ -1,9 +1,7 @@
 {
-  "port": 8095,
+  "port": 443,
   "token": "СГЕНЕРИРУЙ: python3 -c 'import secrets;print(secrets.token_urlsafe(24))'",
   "notify_cmd": "/opt/lumen/tg-notify.py",
-  "ui_user": "",
-  "ui_password": "",
   "raw_keep_hours": 48,
   "rollup_keep_days": 30,
   "rules": {
@@ -21,5 +19,9 @@
     "check_for_sec": 60,
     "etcd_fsync_ms": 100,
     "osd_latency_ms": 250
-  }
+  },
+  "redirect_port": 80,
+  "public_url": "https://192.168.3.37",
+  "tls_cert": "/etc/lumen/server.crt",
+  "tls_key": "/etc/lumen/server.key"
 }

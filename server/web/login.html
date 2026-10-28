@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen — вход</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='12' fill='%233ecf8e'/></svg>">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+:root{--bg:#0b0d12;--surface:#151922;--surface2:#1c212c;--line:#2a3141;--text:#eef0f4;--muted:#a6aec0;--ok:#3ecf8e;--crit:#f2555a}
+@media (prefers-color-scheme: light){:root{--bg:#f4f5f7;--surface:#fff;--surface2:#f7f8fa;--line:#e5e8ee;--text:#111418;--muted:#5b6475;--ok:#12a26a;--crit:#dc3545}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:16px}
+form{width:min(360px,100%);background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:20px;letter-spacing:-.02em;margin-bottom:6px}
+.logo i{width:20px;height:20px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#b9f5d8,var(--ok) 55%,#0b7a4f)}
+p{color:var(--muted);margin:0 0 22px;font-size:13px}
+label{display:block;font-size:12px;color:var(--muted);font-weight:500;margin-bottom:6px}
+input{width:100%;font:inherit;color:var(--text);background:var(--surface2);border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:14px}
+input:focus{outline:2px solid color-mix(in srgb,var(--ok) 50%,transparent);outline-offset:1px}
+button{width:100%;font:inherit;font-weight:600;color:#06120c;background:var(--ok);border:0;border-radius:9px;padding:11px;cursor:pointer;margin-top:4px}
+button:disabled{opacity:.6}
+.err{color:var(--crit);font-size:13px;min-height:20px;margin-top:12px}
+</style>
+</head>
+<body>
+<form id="f">
+  <div class="logo"><i></i>Lumen</div>
+  <p>Мониторинг кластера</p>
+  <label for="u">Логин</label><input id="u" autocomplete="username" required autofocus>
+  <label for="p">Пароль</label><input id="p" type="password" autocomplete="current-password" required>
+  <button id="b">Войти</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+document.getElementById("f").onsubmit = async ev => {
+  ev.preventDefault();
+  const b = document.getElementById("b"), e = document.getElementById("e");
+  b.disabled = true; e.textContent = "";
+  try {
+    const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json", "X-Lumen": "1"},
+      body: JSON.stringify({user: document.getElementById("u").value, password: document.getElementById("p").value})});
+    if (r.ok) { location.href = "/"; return; }
+    e.textContent = (await r.json()).error || "Ошибка входа";
+  } catch (x) { e.textContent = "Сервер недоступен"; }
+  b.disabled = false;
+};
+</script>
+</body>
+</html>

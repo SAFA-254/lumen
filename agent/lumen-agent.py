@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы)
-и отправляет их на сервер. Только стандартная библиотека Python."""
+"""Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
+проверки сервисов, входы по SSH, статистику PostgreSQL) и отправляет их на сервер.
+Только стандартная библиотека Python."""
 import json
 import os
 import platform
@@ -28,6 +29,9 @@ CFG = {
     "etcd_urls": [],
     "checks": [],
     "checks_interval": 30,
+    "ssh_interval": 60,
+    "pg_interval": 30,
+    "ca_file": "",            # сертификат сервера Lumen для проверки HTTPS
 }
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH) as f:
@@ -230,9 +234,18 @@ def mod_pve():
             nodes.append({"name": r["node"], "status": r.get("status"), "cpu": r.get("cpu"),
                           "mem": r.get("mem"), "maxmem": r.get("maxmem"), "uptime": r.get("uptime")})
         elif t in ("qemu", "lxc"):
-            guests.append({k: r.get(k) for k in ("vmid", "name", "type", "node", "status", "cpu", "maxcpu",
-                                                  "mem", "maxmem", "disk", "maxdisk", "uptime", "template",
-                                                  "netin", "netout")})
+            g = {k: r.get(k) for k in ("vmid", "name", "type", "node", "status", "cpu", "maxcpu",
+                                       "mem", "maxmem", "disk", "maxdisk", "uptime", "template")}
+            guests.append(g)
+            if g["status"] == "running" and not g["template"]:
+                now, vid = time.time(), g["vmid"]
+                rates = {k: C.rate(f"vm{vid}:{k}", r.get(src) or 0, now)
+                         for k, src in (("net_rx", "netin"), ("net_tx", "netout"),
+                                        ("disk_r", "diskread"), ("disk_w", "diskwrite"))}
+                g.update(rates)
+                series(f"_vm{vid}", dict(rates, cpu=round(100 * (g["cpu"] or 0), 2),
+                                         mem=round(100 * g["mem"] / g["maxmem"], 2) if g["maxmem"] else None,
+                                         mem_used=g["mem"]))
         elif t == "storage" and r.get("status") == "available":
             storage.append({k: r.get(k) for k in ("storage", "node", "plugintype", "disk", "maxdisk", "shared")})
     # общий storage показываем один раз
@@ -271,7 +284,9 @@ def mod_ceph():
                    "avail": p["stats"].get("max_avail")} for p in df.get("pools", [])],
     }
     io = out["io"]
-    series("_ceph", dict(osd_lat, io_rd=io["rd"], io_wr=io["wr"], ops_rd=io["rd_ops"], ops_wr=io["wr_ops"]))
+    used_pct = round(100.0 * out["bytes"]["used"] / out["bytes"]["total"], 3) if out["bytes"]["total"] else None
+    series("_ceph", dict(osd_lat, io_rd=io["rd"], io_wr=io["wr"], ops_rd=io["rd_ops"], ops_wr=io["wr_ops"],
+                         used_pct=used_pct))
     out["osd_lat"] = osd_lat
     return out
 
@@ -392,9 +407,18 @@ def check_one(c):
     return res
 
 
+# Список проверок задаётся на сервере (в настройках Lumen); пока сервер его не прислал,
+# используется локальный список из agent.json.
+SERVER_CHECKS = None
+
+
+def active_checks():
+    return SERVER_CHECKS if SERVER_CHECKS is not None else CFG["checks"]
+
+
 def mod_checks():
     with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(check_one, CFG["checks"]))
+        results = list(ex.map(check_one, active_checks()))
     series("_checks", {r["name"]: r["ms"] for r in results if r["ok"]})
     return results
 
@@ -423,13 +447,96 @@ def mod_backups():
     return {"tasks": tasks[:15], "guests": guests, "storage": CFG["backup_storage"]}
 
 
+SSH_STATE = {"cursor": None, "pending": []}
+SSH_ACCEPTED = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port")
+
+
+def journal(args):
+    """Читает журнал от сохранённого курсора: journald сразу переходит к нужному месту,
+    поэтому это быстро даже на большом журнале. Возвращает строки и новый курсор."""
+    out = subprocess.run(["journalctl", "--no-pager", "-q", "--show-cursor"] + args,
+                         capture_output=True, text=True, timeout=20).stdout.splitlines()
+    cursor = None
+    if out and out[-1].startswith("-- cursor: "):
+        cursor = out.pop()[len("-- cursor: "):]
+    return out, cursor
+
+
+def mod_ssh():
+    """Новые успешные входы по SSH из журнала (только после запуска агента)."""
+    if SSH_STATE["cursor"] is None:
+        _, SSH_STATE["cursor"] = journal(["-n", "0"])  # начинаем с текущего конца журнала
+        return None
+    lines, cursor = journal(["--after-cursor", SSH_STATE["cursor"], "-t", "sshd", "-t", "sshd-session",
+                             "-o", "short-unix"])
+    for line in lines:
+        m = SSH_ACCEPTED.search(line)
+        if m:
+            try:
+                ts = float(line.split()[0])
+            except (ValueError, IndexError):
+                ts = time.time()
+            SSH_STATE["pending"].append({"ts": ts, "method": m.group(1), "user": m.group(2), "ip": m.group(3)})
+    if cursor:
+        SSH_STATE["cursor"] = cursor
+    return None  # входы уходят отдельным полем ssh_logins
+
+
+PG_QUERY = """SELECT json_build_object(
+  'version', current_setting('server_version'),
+  'in_recovery', pg_is_in_recovery(),
+  'max_conn', current_setting('max_connections')::int,
+  'conn_total', (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'),
+  'conn_active', (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND state = 'active'),
+  'conn_idle_tx', (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'
+                   AND state LIKE 'idle in transaction%'),
+  'oldest_xact_sec', (SELECT coalesce(extract(epoch FROM max(now() - xact_start)), 0) FROM pg_stat_activity
+                      WHERE backend_type = 'client backend' AND xact_start IS NOT NULL),
+  'dbs', (SELECT json_agg(json_build_object('name', datname, 'size', pg_database_size(datname)) ORDER BY datname)
+          FROM pg_database WHERE NOT datistemplate),
+  'xact', (SELECT sum(xact_commit + xact_rollback) FROM pg_stat_database),
+  'blks_hit', (SELECT sum(blks_hit) FROM pg_stat_database),
+  'blks_read', (SELECT sum(blks_read) FROM pg_stat_database),
+  'deadlocks', (SELECT sum(deadlocks) FROM pg_stat_database),
+  'checkpoints', (SELECT num_timed + num_requested FROM pg_stat_checkpointer)
+)"""
+
+
+def mod_postgres():
+    try:
+        # смена пользователя без runuser/PAM, чтобы не засорять журнал входов каждые 30 секунд
+        out = subprocess.run(["psql", "-XAtq", "-d", "postgres", "-c", PG_QUERY], user="postgres", group="postgres",
+                             extra_groups=[], env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                             capture_output=True, text=True, timeout=20, cwd="/")
+        if out.returncode:
+            raise RuntimeError(out.stderr.strip()[-200:] or f"psql exit {out.returncode}")
+        d = json.loads(out.stdout)
+    except Exception as e:
+        return {"error": str(e)[:200]}
+    now = time.time()
+    d["db_size"] = sum(x["size"] for x in d.get("dbs") or [])
+    d["tps"] = C.rate("pg:xact", d["xact"] or 0, now)
+    hit, rd = C.rate("pg:hit", d["blks_hit"] or 0, now), C.rate("pg:read", d["blks_read"] or 0, now)
+    d["cache_hit"] = round(100.0 * hit / (hit + rd), 2) if hit is not None and rd is not None and hit + rd else None
+    d["checkpoints_per_h"] = (C.rate("pg:ckpt", d["checkpoints"] or 0, now) or 0) * 3600
+    series("_pg_" + CFG["host"], {k: d.get(k) for k in ("conn_total", "conn_active", "conn_idle_tx", "tps",
+                                                          "cache_hit", "db_size", "oldest_xact_sec")})
+    return d
+
+
 MODULES = {
     "pve": (mod_pve, "cluster_interval"),
     "ceph": (mod_ceph, "cluster_interval"),
     "patroni": (mod_patroni, "interval"),
     "backups": (mod_backups, "backup_interval"),
     "checks": (mod_checks, "checks_interval"),
+    "ssh": (mod_ssh, "ssh_interval"),
+    "postgres": (mod_postgres, "pg_interval"),
 }
+CLUSTER_KEY = {"checks": "checks:{host}", "postgres": "postgres:{host}"}  # у каждого хоста свой ключ
+
+
+PUSH_CTX = ssl.create_default_context(cafile=CFG["ca_file"]) if CFG["ca_file"] else None
 
 
 def push(payload):
@@ -437,11 +544,12 @@ def push(payload):
                                  data=json.dumps(payload).encode(), method="POST",
                                  headers={"Content-Type": "application/json",
                                           "Authorization": "Bearer " + CFG["token"]})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        r.read()
+    with urllib.request.urlopen(req, timeout=10, context=PUSH_CTX) as r:
+        return json.loads(r.read() or b"{}")
 
 
 def main():
+    global SERVER_CHECKS
     last_run = {}
     system(time.time())  # первые значения счётчиков
     errors = 0
@@ -449,22 +557,33 @@ def main():
         t0 = time.time()
         payload = {"host": CFG["host"], "ts": int(t0), "interval": CFG["interval"],
                    "metrics": system(t0), "disks": disks(), "info": info(), "cluster": {}}
-        for name in CFG["modules"]:
-            if name not in MODULES:
+        modules = list(CFG["modules"])
+        if active_checks() and "checks" not in modules:
+            modules.append("checks")  # сервер назначил этот хост выполнять проверки
+        for name in modules:
+            if name not in MODULES or (name == "checks" and not active_checks()):
                 continue
             fn, ivkey = MODULES[name]
             if t0 - last_run.get(name, 0) < CFG[ivkey]:
                 continue
             last_run[name] = t0
             try:
-                # проверки сервисов можно запускать с нескольких хостов, у каждого свой ключ
-                payload["cluster"]["checks:" + CFG["host"] if name == "checks" else name] = fn()
+                res = fn()
+                if res is not None:
+                    payload["cluster"][CLUSTER_KEY.get(name, name).format(host=CFG["host"])] = res
             except Exception as e:
                 print(f"module {name}: {e!r}", file=sys.stderr, flush=True)
         payload["series"] = dict(SERIES)
         SERIES.clear()
+        if CFG["checks"]:
+            payload["checks_local"] = CFG["checks"]
+        if SSH_STATE["pending"]:
+            payload["ssh_logins"] = SSH_STATE["pending"]
         try:
-            push(payload)
+            reply = push(payload)
+            SSH_STATE["pending"] = []
+            if "checks" in reply:
+                SERVER_CHECKS = reply["checks"]
             errors = 0
         except Exception as e:
             errors += 1
