@@ -12,7 +12,7 @@ import sys
 import time
 import urllib.request
 
-URL = os.environ.get("LUMEN_HEALTH_URL", "https://192.168.3.37/api/health")
+URL = os.environ.get("LUMEN_HEALTH_URL", "https://192.168.3.7/api/health")
 CA = os.environ.get("LUMEN_CA", "/etc/lumen/server.crt")
 NOTIFY = os.environ.get("LUMEN_NOTIFY", "/root/tg-notify.sh")
 STATE = "/var/lib/lumen-watchdog/state.json"

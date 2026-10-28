@@ -1,12 +1,12 @@
 #!/bin/bash
-# Обновление Lumen. Сервер живёт в CT 108 (lumen, https://192.168.3.37) на pve2, агенты — на pve1-3,
+# Обновление Lumen. Сервер живёт в CT 108 (lumen, https://192.168.3.7) на pve2, агенты — на pve1-3,
 # в CT 101 (etcd-arbiter), CT 108 и в VM 104-106 (ставятся через qemu-guest-agent).
 # Запускать на pve1 из /root/lumen. Существующие конфиги (/etc/lumen/*.json, telegram.env, ключ TLS)
 # не трогаются — обновляются код, юниты и сертификат сервера; агенту в VM конфиг создаётся только при первой установке.
 set -euo pipefail
 cd "$(dirname "$0")"
 CT_NODE=root@192.168.3.4   # pve2: там CT 101 и CT 108
-SERVER=https://192.168.3.37
+SERVER=https://192.168.3.7
 TOKEN=$(python3 -c 'import json;print(json.load(open("/etc/lumen/agent.json"))["token"])')
 # VM: vmid -> модули агента
 declare -A VM_MODULES=([104]='["system","ssh"]' [105]='["system","ssh","postgres"]' [106]='["system","ssh","postgres"]')
@@ -24,6 +24,7 @@ push_ct 108 $tmp/app.tgz /tmp/app.tgz
 push_ct 108 $tmp/lumen-agent.py /opt/lumen/lumen-agent.py
 push_ct 108 $tmp/lumen-server.service /etc/systemd/system/lumen-server.service
 push_ct 108 $tmp/lumen-agent.service /etc/systemd/system/lumen-agent.service
+push_ct 108 $tmp/server.crt /etc/lumen/server.crt 644
 ssh $CT_NODE "pct exec 108 -- sh -c 'tar -C /opt/lumen -xzf /tmp/app.tgz && rm /tmp/app.tgz && chmod 755 /opt/lumen/tg-notify.py /opt/lumen/lumen-server.py \
   && systemctl daemon-reload && systemctl restart lumen-server lumen-agent'"
 

@@ -71,7 +71,7 @@
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
-  -subj /CN=lumen -addext subjectAltName=IP:192.168.3.37 \
+  -subj /CN=lumen -addext subjectAltName=IP:192.168.3.7 \
   -keyout /etc/lumen/server.key -out /etc/lumen/server.crt
 ```
 

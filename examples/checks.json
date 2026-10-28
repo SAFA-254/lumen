@@ -9,5 +9,5 @@
   {"name": "Zabbix", "type": "http", "url": "http://192.168.3.6/"},
   {"name": "nextcloud-db", "type": "ping", "host": "192.168.3.11"},
   {"name": "nextcloud-db2", "type": "ping", "host": "192.168.3.32"},
-  {"name": "cartridge", "type": "ping", "host": "192.168.3.7"}
+  {"name": "cartridge", "type": "ping", "host": "192.168.3.37"}
 ]
