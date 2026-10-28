@@ -81,6 +81,8 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 
 /* layout */
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:16px;align-items:start}
+#ssh-p .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));column-gap:0}
+#ssh-p .li .cnt{font-size:11px;color:var(--muted);background:var(--surface2);border-radius:5px;padding:0 5px}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);min-width:0}
 .ph{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line)}
@@ -275,7 +277,7 @@ body.wall .status{font-size:15px;padding:7px 14px}
   <div class="kpis" id="kpis"></div>
 
   <div class="layout">
-    <div class="col">
+    <div class="col" id="col-l">
       <section class="panel" id="hosts-p">
         <div class="ph"><h3>Хосты</h3><span class="meta" id="hosts-meta"></span></div>
         <div id="hosts"></div>
@@ -284,7 +286,7 @@ body.wall .status{font-size:15px;padding:7px 14px}
       <section class="panel" id="guests-p"></section>
       <section class="panel" id="checks-p"></section>
     </div>
-    <div class="col">
+    <div class="col" id="col-r">
       <section class="panel" id="events-p"><div class="ph"><h3>События</h3><button class="link" onclick="openDrawer('@history')">история алертов →</button><span class="meta">последние 40</span></div><div class="events" id="events"></div></section>
       <section class="panel" id="ceph-p"></section>
       <section class="panel" id="patroni-p"></section>
@@ -666,10 +668,16 @@ function renderBackups(b, pv) {
 
 function renderSSH(logins, now) {
   const el = $("#ssh-p");
+  const groups = [];
+  for (const l of logins) {
+    const g = groups[groups.length - 1];
+    if (g && g.user == l.user && g.host == l.host && g.ip == l.ip && g.first - l.ts < 600) { g.n++; g.first = l.ts; }
+    else groups.push({...l, n: 1, first: l.ts});
+  }
   const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length;
   el.innerHTML = panelHead("Входы по SSH", unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : "", "последние 15") +
-    (logins.length ? `<div class="list" style="padding:4px 0">${logins.map(l => `<div class="li" title="${esc(l.method)}">
-      <span class="dot ${l.known ? "" : "warn"}"></span><span><b style="font-weight:500">${esc(l.user)}</b> → ${esc(l.host)}</span>
+    (logins.length ? `<div class="list" style="padding:4px 0">${groups.map(l => `<div class="li" title="${esc(l.method)}">
+      <span class="dot ${l.known ? "" : "warn"}"></span><span><b style="font-weight:500">${esc(l.user)}</b> → ${esc(l.host)}</span>${l.n > 1 ? `<span class="cnt num">×${l.n}</span>` : ""}
       <span class="end num"><span style="color:${l.known ? "var(--muted)" : "var(--warn)"}">${esc(l.ip)}</span> · ${fmt.time(l.ts, now - l.ts > 86400)}</span></div>`).join("")}</div>`
       : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`);
 }
@@ -708,6 +716,19 @@ function render(d) {
   renderBackups(d.cluster.backups, d.cluster.pve);
   renderSSH(d.logins || [], d.now);
   $("#events").innerHTML = d.events.map(e => `<div class="ev"><time class="num">${fmt.time(e.ts, d.now - e.ts > 86400)}</time><span class="dot ${e.level}"></span><span>${esc(e.msg)}</span></div>`).join("") || `<div class="empty">пока тихо</div>`;
+  balance();
+}
+
+/* Выравнивание колонок: бэкапы и входы по SSH переезжают в левую колонку, если правая заметно длиннее */
+function balance() {
+  const L = $("#col-l"), R = $("#col-r"), movable = [$("#backups-p"), $("#ssh-p")];
+  movable.forEach(p => R.append(p));
+  if (getComputedStyle(L.parentNode).gridTemplateColumns.split(" ").length < 2) return;
+  const gap = 16;
+  for (const p of [...movable].reverse()) {
+    if (p.offsetHeight + gap >= R.offsetHeight - L.offsetHeight) break;
+    L.insertBefore(p, movable.find(m => m != p && m.parentNode == L && movable.indexOf(m) > movable.indexOf(p)) || null);
+  }
 }
 
 /* --------------------------------------------------------------- drawers */
@@ -1029,7 +1050,7 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 10000);
-let rs; addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => OPEN && OPEN != "@settings" && drawOpen(), 200); });
+let rs; addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => { if (DATA) balance(); OPEN && OPEN != "@settings" && drawOpen(); }, 200); });
 </script>
 </body>
 </html>
