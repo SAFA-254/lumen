@@ -709,6 +709,23 @@ def morning_summary():
             by.setdefault(h, {})[m] = v
         out.append("Пики за сутки: " + "; ".join(f"{h} CPU {v.get('cpu', 0):.0f}% RAM {v.get('mem', 0):.0f}%"
                                                 for h, v in sorted(by.items())))
+    gaps, first = {}, {}
+    for (h,) in S.q("SELECT name FROM hosts"):
+        ts = [r[0] for r in S.q("SELECT ts FROM raw WHERE host=? AND metric='cpu' AND ts > ? ORDER BY ts", (h, int(day)))]
+        if ts:
+            first[h] = ts[0]
+            gaps[h] = [(a, b) for a, b in zip(ts, ts[1:]) if b - a > 600]
+    span = lambda a, b: f"{time.strftime('%H:%M', time.localtime(a))}–{time.strftime('%H:%M', time.localtime(b))} ({fmt_dur(b - a)})"
+    same = lambda g, v: any(abs(a - g[0]) < 120 and abs(b - g[1]) < 120 for a, b in v)
+    # пробел у всех хостов, которые уже присылали данные: скорее всего не работал сам Lumen (или его узел)
+    shared = [g for g in sorted({g for v in gaps.values() for g in v})
+              if len(alive := [h for h in gaps if first[h] < g[0]]) >= 2 and all(same(g, gaps[h]) for h in alive)]
+    if shared:
+        out.append("⚠️ Lumen не получал данных: " + "; ".join(span(a, b) for a, b in shared[:3]))
+    for h, v in sorted(gaps.items()):
+        own = [g for g in v if not any(abs(g[0] - s[0]) < 120 for s in shared)]
+        if own:
+            out.append(f"Нет данных от {h}: " + "; ".join(span(a, b) for a, b in own[:3]))
     fsync = S.q("SELECT metric, MAX(v) FROM raw WHERE host='_etcd' AND metric LIKE 'fsync:%' AND ts > ? "
                 "GROUP BY metric", (int(day),))
     if fsync:
