@@ -1,0 +1,7 @@
+{
+  "server": "http://192.168.3.37:8095",
+  "token": "тот же, что в server.json",
+  "host": "pve1",
+  "modules": ["system", "pve", "ceph", "backups"],
+  "backup_storage": "pbs"
+}

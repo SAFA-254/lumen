@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='12' fill='%2334d399'/></svg>">
+<style>
+:root{
+  --bg:#0b0d12; --panel:#12151c; --panel2:#171b24; --line:#232836; --text:#e6e8ee; --muted:#8a91a3; --faint:#5b6275;
+  --ok:#34d399; --warn:#fbbf24; --crit:#f87171; --info:#60a5fa;
+  --c1:#60a5fa; --c2:#a78bfa; --c3:#34d399; --c4:#f472b6; --c5:#fbbf24;
+  --radius:14px; --shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.25);
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#f4f5f8; --panel:#ffffff; --panel2:#f7f8fb; --line:#e3e6ee; --text:#151821; --muted:#5d6475; --faint:#9aa1b2;
+    --ok:#059669; --warn:#d97706; --crit:#dc2626; --info:#2563eb;
+    --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706;
+    --shadow:0 1px 2px rgba(16,24,40,.05), 0 4px 16px rgba(16,24,40,.05);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#f4f5f8; --panel:#ffffff; --panel2:#f7f8fb; --line:#e3e6ee; --text:#151821; --muted:#5d6475; --faint:#9aa1b2;
+  --ok:#059669; --warn:#d97706; --crit:#dc2626; --info:#2563eb;
+  --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706;
+  --shadow:0 1px 2px rgba(16,24,40,.05), 0 4px 16px rgba(16,24,40,.05);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums}
+a{color:inherit}
+.wrap{max-width:1440px;margin:0 auto;padding:20px 24px 48px}
+header{display:flex;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:10px;font-weight:650;font-size:18px;letter-spacing:-.01em}
+.logo i{width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#a7f3d0,var(--ok) 60%,#047857);box-shadow:0 0 18px color-mix(in srgb,var(--ok) 55%,transparent)}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:13px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.dot.warn{background:var(--warn)} .dot.crit{background:var(--crit)} .dot.off{background:var(--faint)}
+.dot.pulse{box-shadow:0 0 0 0 currentColor;animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.spacer{flex:1}
+button{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:6px 11px;cursor:pointer}
+button:hover{border-color:var(--faint)}
+button.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:28px 0 12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.alerts{display:flex;flex-direction:column;gap:8px}
+.alert{display:flex;align-items:center;gap:12px;padding:11px 16px;border-radius:12px;background:color-mix(in srgb,var(--warn) 10%,var(--panel));border:1px solid color-mix(in srgb,var(--warn) 35%,var(--line))}
+.alert.crit{background:color-mix(in srgb,var(--crit) 10%,var(--panel));border-color:color-mix(in srgb,var(--crit) 40%,var(--line))}
+.alert .since{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+.hosts{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.host{padding:16px 16px 14px;cursor:pointer;transition:transform .12s,border-color .12s}
+.host:hover{transform:translateY(-2px);border-color:var(--faint)}
+.host.down{opacity:.6}
+.host-top{display:flex;align-items:center;gap:9px}
+.host-name{font-weight:620;font-size:15px}
+.host-sub{color:var(--muted);font-size:12px;margin:2px 0 12px 17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.m-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.m-val{font-size:22px;font-weight:620;letter-spacing:-.02em}
+.m-val small{font-size:12px;color:var(--muted);font-weight:500;margin-left:2px}
+.spark{display:block;width:100%;height:34px;margin-top:4px}
+.bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden;border:1px solid var(--line)}
+.bar>i{display:block;height:100%;border-radius:99px;background:var(--ok)}
+.bar>i.warn{background:var(--warn)} .bar>i.crit{background:var(--crit)}
+.kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-top:10px}
+.kv b{color:var(--text);font-weight:550}
+.disks{margin-top:12px;display:flex;flex-direction:column;gap:7px}
+.disk{display:grid;grid-template-columns:70px 1fr 40px;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
+.disk span:last-child{text-align:right;color:var(--text)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.panel{padding:18px}
+.panel-h{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.panel-h h3{margin:0;font-size:15px;font-weight:620}
+.panel-h .meta{margin-left:auto;color:var(--faint);font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:550;background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
+.badge.warn{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)}
+.badge.crit{background:color-mix(in srgb,var(--crit) 14%,transparent);color:var(--crit)}
+.badge.mute{background:var(--panel2);color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:10px 12px}
+.stat .m-val{font-size:18px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-weight:500;color:var(--muted);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:0 10px 8px}
+td{padding:8px 10px;border-top:1px solid var(--line);white-space:nowrap}
+td.r,th.r{text-align:right}
+.tbl-wrap{overflow-x:auto}
+.events{display:flex;flex-direction:column;max-height:360px;overflow:auto}
+.ev{display:grid;grid-template-columns:62px 10px 1fr;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--line);font-size:13px}
+.ev:first-child{border-top:0}
+.ev time{color:var(--faint);font-size:12px}
+.ev .dot.ok{background:var(--ok)} .ev .dot.info{background:var(--info)}
+.empty{color:var(--faint);font-size:13px;padding:8px 0}
+.pools{display:flex;flex-direction:column;gap:10px}
+.pool{display:grid;grid-template-columns:110px 1fr 150px;gap:10px;align-items:center;font-size:13px}
+.pool .muted{color:var(--muted);text-align:right;font-size:12px}
+.muted{color:var(--muted)}
+/* drawer */
+.overlay{position:fixed;inset:0;background:rgba(5,7,12,.55);backdrop-filter:blur(3px);display:none;z-index:10}
+.overlay.open{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(980px,100%);background:var(--bg);border-left:1px solid var(--line);z-index:11;transform:translateX(100%);transition:transform .22s ease;overflow:auto}
+.drawer.open{transform:none}
+.drawer-in{padding:22px 24px 40px}
+.drawer-h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.drawer-h h3{margin:0;font-size:20px;font-weight:650}
+.ranges{display:flex;gap:4px}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.chart{padding:14px 14px 8px}
+.chart-h{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+.chart-h h4{margin:0;font-size:13px;font-weight:600}
+.legend{display:flex;gap:12px;margin-left:auto;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:9px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.chart svg{display:block;width:100%;height:170px;overflow:visible}
+.chart .grid line{stroke:var(--line)}
+.chart .axis text{fill:var(--faint);font-size:10px}
+.tip{position:fixed;pointer-events:none;z-index:20;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12px;box-shadow:var(--shadow);display:none;min-width:120px}
+.tip div{display:flex;justify-content:space-between;gap:14px}
+.tip .t{color:var(--muted);margin-bottom:3px}
+.info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+@media (max-width:900px){
+  .grid2,.charts{grid-template-columns:1fr}
+  .stats,.info-grid{grid-template-columns:repeat(2,1fr)}
+  .wrap{padding:16px}
+  .pool{grid-template-columns:90px 1fr;}
+  .pool .muted{grid-column:1/-1;text-align:left}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><i></i>Lumen</div>
+    <span class="pill" id="summary"><span class="dot"></span>загрузка…</span>
+    <div class="spacer"></div>
+    <span class="pill num" id="updated">—</span>
+    <button id="theme" title="Тема">◐</button>
+  </header>
+
+  <div class="alerts" id="alerts"></div>
+
+  <h2>Хосты</h2>
+  <div class="hosts" id="hosts"></div>
+
+  <div class="grid2" style="margin-top:28px">
+    <div class="card panel" id="ceph"></div>
+    <div class="card panel" id="patroni"></div>
+  </div>
+
+  <h2>Виртуальные машины и контейнеры</h2>
+  <div class="card panel tbl-wrap" id="guests"></div>
+
+  <div class="grid2" style="margin-top:28px">
+    <div class="card panel" id="backups"></div>
+    <div class="card panel"><div class="panel-h"><h3>События</h3><span class="meta">последние 40</span></div><div class="events" id="events"></div></div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer"><div class="drawer-in" id="drawer-in"></div></aside>
+<div class="tip" id="tip"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+const fmt = {
+  pct: v => v == null ? "—" : (v >= 10 ? v.toFixed(0) : v.toFixed(1)),
+  bytes(v, d = 1) {
+    if (v == null) return "—";
+    const u = ["Б","КБ","МБ","ГБ","ТБ","ПБ"]; let i = 0;
+    while (Math.abs(v) >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i ? v.toFixed(v >= 100 ? 0 : d) : Math.round(v)) + " " + u[i];
+  },
+  rate: v => v == null ? "—" : fmt.bytes(v) + "/с",
+  bits(v) {
+    if (v == null) return "—";
+    v *= 8; const u = ["бит/с","Кбит/с","Мбит/с","Гбит/с"]; let i = 0;
+    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+    return v.toFixed(v >= 100 || i == 0 ? 0 : 1) + " " + u[i];
+  },
+  dur(s) {
+    if (s == null) return "—";
+    s = Math.floor(s);
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return d ? `${d} д ${h} ч` : h ? `${h} ч ${m} мин` : m ? `${m} мин` : `${s} с`;
+  },
+  ago: s => s < 60 ? "только что" : fmt.dur(s) + " назад",
+  time(ts, withDate) {
+    const d = new Date(ts * 1000);
+    const t = d.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"});
+    return withDate ? d.toLocaleDateString("ru-RU", {day:"2-digit", month:"2-digit"}) + " " + t : t;
+  },
+};
+const level = (v, w, c) => v >= c ? "crit" : v >= w ? "warn" : "";
+const bar = (pct, w = 80, c = 92) => `<div class="bar"><i class="${level(pct, w, c)}" style="width:${Math.min(100, Math.max(1, pct))}%"></i></div>`;
+
+/* --------------------------------------------------------------- sparkline */
+function spark(points, color, max = 100) {
+  if (!points || points.length < 2) return `<svg class="spark"></svg>`;
+  const W = 120, H = 34, t0 = points[0][0], t1 = points[points.length - 1][0] || t0 + 1;
+  const xy = points.map(([t, v]) => [(t - t0) / (t1 - t0 || 1) * W, H - 2 - Math.min(v, max) / max * (H - 4)]);
+  const d = xy.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
+  const id = "g" + Math.random().toString(36).slice(2, 8);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${d}L${W} ${H}L0 ${H}Z" fill="url(#${id})"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+
+/* --------------------------------------------------------------- big chart */
+function lineChart(el, series, opt = {}) {
+  const W = el.clientWidth || 440, H = 170, L = 46, R = 8, T = 8, B = 20;
+  const all = series.flatMap(s => s.points);
+  if (!all.length) { el.innerHTML = `<div class="empty" style="height:${H}px;display:grid;place-items:center">нет данных</div>`; return; }
+  const t0 = Math.min(...all.map(p => p[0])), t1 = Math.max(...all.map(p => p[0])) || t0 + 1;
+  let max = opt.max ?? Math.max(...all.map(p => p[1])) * 1.15;
+  if (!max || max <= 0) max = 1;
+  const x = t => L + (t - t0) / (t1 - t0 || 1) * (W - L - R);
+  const y = v => T + (1 - Math.min(v, max) / max) * (H - T - B);
+  const yf = opt.fmt || (v => v.toFixed(0));
+  let g = `<g class="grid">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4;
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>`;
+  }
+  g += `</g><g class="axis">`;
+  for (let i = 0; i <= 4; i += 2) g += `<text x="${L - 6}" y="${y(max * i / 4) + 3}" text-anchor="end">${yf(max * i / 4)}</text>`;
+  const span = t1 - t0;
+  for (let i = 0; i <= 4; i++) {
+    const t = t0 + span * i / 4;
+    g += `<text x="${x(t)}" y="${H - 4}" text-anchor="${i == 0 ? "start" : i == 4 ? "end" : "middle"}">${fmt.time(t, span > 86400 * 1.5)}</text>`;
+  }
+  g += `</g>`;
+  let paths = "";
+  series.forEach((s, i) => {
+    if (!s.points.length) return;
+    // разрыв линии, если между точками пропуск больше 3 шагов
+    let d = "", prev = null;
+    for (const [t, v] of s.points) {
+      d += (prev == null || t - prev > (s.step || 60) * 3 ? "M" : "L") + x(t).toFixed(1) + " " + y(v).toFixed(1);
+      prev = t;
+    }
+    if (s.fill) paths += `<path d="${d}L${x(s.points.at(-1)[0])} ${y(0)}L${x(s.points[0][0])} ${y(0)}Z" fill="${s.color}" opacity=".12"/>`;
+    paths += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.7" stroke-linejoin="round"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}">${g}${paths}<line class="cur" y1="${T}" y2="${H - B}" stroke="${css("--faint")}" stroke-dasharray="3 3" style="display:none"/><rect x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent"/></svg>`;
+  const svg = el.querySelector("svg"), cur = svg.querySelector(".cur"), tip = $("#tip");
+  svg.addEventListener("mousemove", e => {
+    const r = svg.getBoundingClientRect();
+    const t = t0 + ((e.clientX - r.left) * W / r.width - L) / (W - L - R) * (t1 - t0);
+    let rows = "", at = null;
+    for (const s of series) {
+      if (!s.points.length) continue;
+      let best = s.points[0];
+      for (const p of s.points) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+      at = at ?? best[0];
+      rows += `<div><span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color};margin-right:6px"></i>${esc(s.name)}</span><b class="num">${yf(best[1])}</b></div>`;
+    }
+    cur.setAttribute("x1", x(at)); cur.setAttribute("x2", x(at)); cur.style.display = "";
+    tip.innerHTML = `<div class="t">${fmt.time(at, true)}</div>${rows}`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+    tip.style.top = (e.clientY + 14) + "px";
+  });
+  svg.addEventListener("mouseleave", () => { cur.style.display = "none"; tip.style.display = "none"; });
+}
+
+/* --------------------------------------------------------------- render */
+let DATA = null, OPEN = null, RANGE = 3600;
+
+function hostState(h) {
+  if (h.age > 90) return "off";
+  const m = h.metrics || {};
+  const disk = Math.max(0, ...(h.disks || []).map(d => 100 * d.used / d.size));
+  return level(Math.max(m.cpu || 0, m.mem || 0, disk), 85, 95) || "ok";
+}
+
+function renderHosts(d) {
+  $("#hosts").innerHTML = d.hosts.map(h => {
+    const m = h.metrics || {}, st = hostState(h), i = h.info || {};
+    const disks = (h.disks || []).slice(0, 3).map(x => {
+      const p = 100 * x.used / x.size;
+      return `<div class="disk"><span title="${esc(x.mount)}" style="overflow:hidden;text-overflow:ellipsis">${esc(x.mount)}</span>${bar(p, 85, 95)}<span class="num">${p.toFixed(0)}%</span></div>`;
+    }).join("");
+    return `<div class="card host ${st == "off" ? "down" : ""}" data-host="${esc(h.name)}">
+      <div class="host-top"><span class="dot ${st == "ok" ? "" : st}"></span><span class="host-name">${esc(h.name)}</span>
+        <span class="spacer"></span><span class="muted num" style="font-size:12px">${st == "off" ? "нет связи " + fmt.ago(h.age) : "up " + fmt.dur(i.uptime)}</span></div>
+      <div class="host-sub">${esc(i.os || "")}${i.cpus ? " · " + i.cpus + " vCPU" : ""}${m.mem_total ? " · " + fmt.bytes(m.mem_total, 0) : ""}</div>
+      <div class="metric-row">
+        <div><div class="m-label">CPU</div><div class="m-val num">${fmt.pct(m.cpu)}<small>%</small></div>${spark(h.spark.cpu, css("--c1"))}</div>
+        <div><div class="m-label">RAM</div><div class="m-val num">${fmt.pct(m.mem)}<small>%</small></div>${spark(h.spark.mem, css("--c2"))}</div>
+      </div>
+      <div class="kv"><span>Сеть <b class="num">↓ ${fmt.bits(m.net_rx)}</b></span><span><b class="num">↑ ${fmt.bits(m.net_tx)}</b></span></div>
+      <div class="kv"><span>Load <b class="num">${m.load1 != null ? m.load1.toFixed(2) : "—"}</b></span>${m.temp != null ? `<span>t° <b class="num">${m.temp.toFixed(0)}°C</b></span>` : m.iowait != null ? `<span>iowait <b class="num">${m.iowait.toFixed(1)}%</b></span>` : ""}</div>
+      <div class="disks">${disks}</div>
+    </div>`;
+  }).join("") || `<div class="empty">Агенты ещё не прислали данные</div>`;
+  document.querySelectorAll(".host").forEach(el => el.onclick = () => openHost(el.dataset.host));
+}
+
+function renderCeph(c) {
+  const el = $("#ceph");
+  if (!c) { el.innerHTML = `<div class="panel-h"><h3>Ceph</h3></div><div class="empty">нет данных</div>`; return; }
+  const hl = c.health == "HEALTH_OK" ? "" : c.health == "HEALTH_ERR" ? "crit" : "warn";
+  const used = c.bytes.used / c.bytes.total * 100;
+  const pgs = c.pgs.states.map(s => `<span class="badge ${s.state_name == "active+clean" ? "" : "warn"}">${s.count} ${esc(s.state_name)}</span>`).join(" ");
+  el.innerHTML = `<div class="panel-h"><h3>Ceph</h3><span class="badge ${hl}">${esc(c.health)}</span><span class="meta">${fmt.ago(c._age)}</span></div>
+    ${c.checks.map(x => `<div class="alert ${x.severity == "HEALTH_ERR" ? "crit" : ""}" style="margin-bottom:8px">${esc(x.msg)}</div>`).join("")}
+    <div class="stats">
+      <div class="stat"><div class="m-label">OSD</div><div class="m-val num">${c.osd.up}/${c.osd.total}</div><div class="muted" style="font-size:12px">up · ${c.osd.in} in</div></div>
+      <div class="stat"><div class="m-label">MON</div><div class="m-val num">${c.mons.length}</div><div class="muted" style="font-size:12px">${esc(c.mons.join(", "))}</div></div>
+      <div class="stat"><div class="m-label">Чтение</div><div class="m-val num" style="font-size:15px">${fmt.rate(c.io.rd)}</div><div class="muted" style="font-size:12px">${c.io.rd_ops} оп/с</div></div>
+      <div class="stat"><div class="m-label">Запись</div><div class="m-val num" style="font-size:15px">${fmt.rate(c.io.wr)}</div><div class="muted" style="font-size:12px">${c.io.wr_ops} оп/с</div></div>
+    </div>
+    <div class="pools">
+      <div class="pool"><b>Всего</b>${bar(used, 75, 85)}<span class="muted num">${fmt.bytes(c.bytes.used)} / ${fmt.bytes(c.bytes.total)}</span></div>
+      ${c.pools.map(p => `<div class="pool"><span>${esc(p.name)}</span>${bar(p.pct, 75, 85)}<span class="muted num">${fmt.bytes(p.stored)} · ${p.pct.toFixed(1)}%</span></div>`).join("")}
+    </div>
+    <div style="margin-top:14px;display:flex;gap:6px;flex-wrap:wrap">${pgs}<span class="muted" style="font-size:12px;align-self:center">${c.pgs.total} PG</span></div>`;
+}
+
+function renderPatroni(p) {
+  const el = $("#patroni");
+  if (!p) { el.innerHTML = `<div class="panel-h"><h3>PostgreSQL · Patroni</h3></div><div class="empty">нет данных</div>`; return; }
+  const ok = !p.error && p.members?.some(m => m.role == "leader") && p.members.every(m => ["running", "streaming"].includes(m.state));
+  const members = (p.members || []).map(m => `<tr>
+      <td><b>${esc(m.name)}</b> <span class="muted">${esc(m.host)}</span></td>
+      <td><span class="badge ${m.role == "leader" ? "" : "mute"}">${m.role == "leader" ? "★ лидер" : esc(m.role)}</span></td>
+      <td><span class="badge ${["running", "streaming"].includes(m.state) ? "" : "crit"}">${esc(m.state)}</span></td>
+      <td class="r num">${m.timeline ?? "—"}</td>
+      <td class="r num">${m.role == "leader" ? "—" : m.lag == null ? "—" : fmt.bytes(m.lag)}</td></tr>`).join("");
+  const etcd = Object.entries(p.etcd || {}).map(([ep, s]) => `<div class="stat"><div class="m-label">etcd ${esc(ep.split(":")[0])}</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px"><span class="dot ${s.ok ? "" : "crit"}"></span><b>${s.ok ? "healthy" : "fail"}</b><span class="muted num" style="margin-left:auto;font-size:12px">${s.ms != null ? s.ms + " мс" : ""}</span></div>
+      ${s.ok ? "" : `<div class="muted" style="font-size:11px;margin-top:4px">${esc(s.err)}</div>`}</div>`).join("");
+  el.innerHTML = `<div class="panel-h"><h3>PostgreSQL · Patroni</h3><span class="badge ${ok ? "" : "crit"}">${ok ? "OK" : "проблема"}</span><span class="meta">${esc(p.scope || "")} · ${fmt.ago(p._age)}</span></div>
+    ${p.error ? `<div class="alert crit" style="margin-bottom:12px">${esc(p.error)}</div>` : ""}
+    <div class="tbl-wrap"><table><tr><th>Узел</th><th>Роль</th><th>Состояние</th><th class="r">TL</th><th class="r">Лаг</th></tr>${members}</table></div>
+    <div class="stats" style="margin:16px 0 0;grid-template-columns:repeat(${Math.max(1, Math.min(3, Object.keys(p.etcd || {}).length))},1fr)">${etcd}</div>`;
+}
+
+function renderGuests(pv) {
+  const el = $("#guests");
+  if (!pv) { el.innerHTML = `<div class="empty">нет данных Proxmox</div>`; return; }
+  const rows = pv.guests.filter(g => !g.template).map(g => {
+    const run = g.status == "running";
+    const mem = g.maxmem ? 100 * g.mem / g.maxmem : 0;
+    return `<tr>
+      <td class="num muted">${g.vmid}</td>
+      <td><b>${esc(g.name)}</b></td>
+      <td><span class="badge mute">${g.type == "lxc" ? "CT" : "VM"}</span></td>
+      <td>${esc(g.node)}</td>
+      <td><span class="badge ${run ? "" : "mute"}"><span class="dot ${run ? "" : "off"}" style="width:6px;height:6px"></span>${esc(g.status)}</span></td>
+      <td class="r num">${run ? (100 * g.cpu).toFixed(0) + "%" : "—"}</td>
+      <td style="width:160px">${run ? `<div style="display:flex;gap:8px;align-items:center">${bar(mem)}<span class="num muted" style="font-size:12px;min-width:90px;text-align:right">${fmt.bytes(g.mem)} / ${fmt.bytes(g.maxmem, 0)}</span></div>` : ""}</td>
+      <td class="r num muted">${run ? fmt.dur(g.uptime) : ""}</td></tr>`;
+  }).join("");
+  const nodes = pv.nodes.map(n => `<span class="badge ${n.status == "online" ? "" : "crit"}">${esc(n.name)} · ${esc(n.status)}</span>`).join(" ");
+  el.innerHTML = `<div class="panel-h" style="flex-wrap:wrap">${nodes}<span class="meta">${fmt.ago(pv._age)}</span></div>
+    <table><tr><th>ID</th><th>Имя</th><th>Тип</th><th>Узел</th><th>Статус</th><th class="r">CPU</th><th>RAM</th><th class="r">Аптайм</th></tr>${rows}</table>`;
+}
+
+function renderBackups(b, pv) {
+  const el = $("#backups");
+  if (!b) { el.innerHTML = `<div class="panel-h"><h3>Бэкапы</h3></div><div class="empty">нет данных</div>`; return; }
+  const now = Date.now() / 1000;
+  const names = Object.fromEntries((pv?.guests || []).map(g => [g.vmid, g.name]));
+  const rows = b.guests.map(g => {
+    const age = now - g.last, lv = age > 36 * 3600 ? "crit" : age > 26 * 3600 ? "warn" : "";
+    return `<tr><td class="num muted">${g.vmid}</td><td>${esc(names[g.vmid] || g.name)}</td>
+      <td><span class="badge ${lv}">${fmt.ago(age)}</span></td>
+      <td class="r num muted">${fmt.bytes(g.size)}</td><td class="r num muted">${g.count}</td>
+      <td>${g.verified == "ok" ? `<span class="badge">✓</span>` : g.verified ? `<span class="badge crit">${esc(g.verified)}</span>` : `<span class="muted">—</span>`}</td></tr>`;
+  }).join("");
+  const tasks = b.tasks.slice(0, 5).map(t => `<div class="ev"><time class="num">${fmt.time(t.starttime, true).split(" ")[0]}</time>
+      <span class="dot ${t.status == "OK" ? "" : t.status ? "crit" : "warn"}"></span>
+      <span>${esc(t.node)} · ${t.status ? esc(t.status) : "идёт…"} <span class="muted">${t.endtime ? "· " + fmt.dur(t.endtime - t.starttime) : ""}</span></span></div>`).join("");
+  el.innerHTML = `<div class="panel-h"><h3>Бэкапы</h3><span class="badge mute">${esc(b.storage)}</span><span class="meta">${fmt.ago(b._age)}</span></div>
+    <div class="tbl-wrap"><table><tr><th>ID</th><th>Гость</th><th>Последний</th><th class="r">Размер</th><th class="r">Копий</th><th>Verify</th></tr>${rows}</table></div>
+    <div style="margin-top:16px" class="m-label">Задания vzdump</div><div class="events" style="margin-top:6px">${tasks || `<div class="empty">нет</div>`}</div>`;
+}
+
+function render(d) {
+  DATA = d;
+  const crit = d.alerts.filter(a => a.level == "crit").length, warn = d.alerts.length - crit;
+  $("#summary").innerHTML = d.alerts.length
+    ? `<span class="dot ${crit ? "crit" : "warn"}"></span>${crit ? crit + " критич." : ""}${crit && warn ? " · " : ""}${warn ? warn + " предупр." : ""}`
+    : `<span class="dot pulse"></span>Всё в порядке · ${d.hosts.length} хост.`;
+  $("#updated").textContent = "обновлено " + fmt.time(d.now) + ":" + String(new Date(d.now * 1000).getSeconds()).padStart(2, "0");
+  $("#alerts").innerHTML = d.alerts.map(a => `<div class="alert ${a.level}"><span class="dot ${a.level}"></span>${esc(a.msg)}<span class="since">${fmt.ago(d.now - a.since)}</span></div>`).join("");
+  renderHosts(d);
+  renderCeph(d.cluster.ceph);
+  renderPatroni(d.cluster.patroni);
+  renderGuests(d.cluster.pve);
+  renderBackups(d.cluster.backups, d.cluster.pve);
+  $("#events").innerHTML = d.events.map(e => `<div class="ev"><time class="num">${fmt.time(e.ts, d.now - e.ts > 86400)}</time><span class="dot ${e.level}"></span><span>${esc(e.msg)}</span></div>`).join("") || `<div class="empty">пока тихо</div>`;
+}
+
+/* --------------------------------------------------------------- host drawer */
+const RANGES = [[3600, "1ч"], [6 * 3600, "6ч"], [86400, "24ч"], [7 * 86400, "7д"], [30 * 86400, "30д"]];
+
+async function openHost(name) {
+  OPEN = name;
+  $("#overlay").classList.add("open"); $("#drawer").classList.add("open");
+  await drawHost();
+}
+function closeHost() {
+  OPEN = null;
+  $("#overlay").classList.remove("open"); $("#drawer").classList.remove("open");
+}
+async function drawHost() {
+  const name = OPEN, h = DATA.hosts.find(x => x.name == name);
+  if (!h) return;
+  const i = h.info || {}, m = h.metrics || {};
+  const disks = (h.disks || []).map(d => "disk:" + d.mount);
+  const st = hostState(h);
+  $("#drawer-in").innerHTML = `
+    <div class="drawer-h"><span class="dot ${st == "ok" ? "" : st}"></span><h3>${esc(name)}</h3>
+      <span class="muted">${esc(i.os || "")} · ${esc(i.kernel || "")}</span><span class="spacer"></span>
+      <div class="ranges">${RANGES.map(([r, l]) => `<button data-r="${r}" class="${r == RANGE ? "on" : ""}">${l}</button>`).join("")}</div>
+      <button id="close">✕</button></div>
+    <div class="info-grid">
+      <div class="stat"><div class="m-label">Аптайм</div><div class="m-val num" style="font-size:16px">${fmt.dur(i.uptime)}</div></div>
+      <div class="stat"><div class="m-label">CPU</div><div class="m-val num" style="font-size:16px">${i.cpus ?? "—"} ядер</div></div>
+      <div class="stat"><div class="m-label">Память</div><div class="m-val num" style="font-size:16px">${fmt.bytes(m.mem_used)} / ${fmt.bytes(m.mem_total, 0)}</div></div>
+      <div class="stat"><div class="m-label">Swap</div><div class="m-val num" style="font-size:16px">${fmt.pct(m.swap)}%</div></div>
+    </div>
+    <div class="charts">
+      <div class="card chart"><div class="chart-h"><h4>CPU</h4><div class="legend" id="lg-cpu"></div></div><div id="ch-cpu"></div></div>
+      <div class="card chart"><div class="chart-h"><h4>Память</h4><div class="legend" id="lg-mem"></div></div><div id="ch-mem"></div></div>
+      <div class="card chart"><div class="chart-h"><h4>Сеть</h4><div class="legend" id="lg-net"></div></div><div id="ch-net"></div></div>
+      <div class="card chart"><div class="chart-h"><h4>Диск I/O</h4><div class="legend" id="lg-io"></div></div><div id="ch-io"></div></div>
+      <div class="card chart"><div class="chart-h"><h4>Load average</h4><div class="legend" id="lg-load"></div></div><div id="ch-load"></div></div>
+      <div class="card chart"><div class="chart-h"><h4>${m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"}</h4><div class="legend" id="lg-disk"></div></div><div id="ch-disk"></div></div>
+    </div>`;
+  $("#close").onclick = closeHost;
+  document.querySelectorAll(".ranges button").forEach(b => b.onclick = () => { RANGE = +b.dataset.r; drawHost(); });
+  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", ...disks];
+  const r = await fetch(`api/history?host=${encodeURIComponent(name)}&range=${RANGE}&metrics=${encodeURIComponent(metrics.join(","))}`).then(r => r.json());
+  if (OPEN != name) return;
+  const S = (key, label, color, fill) => ({name: label, color, fill, points: r[key]?.points || [], step: r[key]?.step});
+  const C = [css("--c1"), css("--c2"), css("--c3"), css("--c4"), css("--c5")];
+  const draw = (id, series, opt) => {
+    series = series.filter(s => s.points.length);
+    $("#lg-" + id).innerHTML = series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+    lineChart($("#ch-" + id), series, opt);
+  };
+  const pct = {max: 100, fmt: v => v.toFixed(0) + "%"};
+  draw("cpu", [S("cpu", "CPU", C[0], true), S("iowait", "iowait", C[4])], pct);
+  draw("mem", [S("mem", "RAM", C[1], true), S("swap", "swap", C[3])], pct);
+  draw("net", [S("net_rx", "вход", C[2], true), S("net_tx", "выход", C[0])], {fmt: fmt.bits});
+  draw("io", [S("disk_r", "чтение", C[0], true), S("disk_w", "запись", C[3])], {fmt: fmt.rate});
+  draw("load", [S("load1", "1 мин", C[4], true)], {fmt: v => v.toFixed(1)});
+  draw("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
+}
+$("#overlay").onclick = closeHost;
+addEventListener("keydown", e => e.key == "Escape" && closeHost());
+
+/* --------------------------------------------------------------- theme + loop */
+const THEMES = ["auto", "dark", "light"];
+function applyTheme(t) {
+  if (t == "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  $("#theme").title = "Тема: " + t;
+}
+let theme = "auto";
+try { theme = localStorage.getItem("lumen-theme") || "auto"; } catch (e) {}
+applyTheme(theme);
+$("#theme").onclick = () => {
+  theme = THEMES[(THEMES.indexOf(theme) + 1) % 3];
+  try { localStorage.setItem("lumen-theme", theme); } catch (e) {}
+  applyTheme(theme);
+  if (DATA) { render(DATA); if (OPEN) drawHost(); }
+};
+
+let tick = 0;
+async function refresh() {
+  try {
+    render(await fetch("api/overview").then(r => r.json()));
+    if (OPEN && ++tick % 3 == 0) drawHost();
+  } catch (e) {
+    $("#summary").innerHTML = `<span class="dot crit"></span>сервер недоступен`;
+  }
+}
+refresh();
+setInterval(refresh, 10000);
+let rs; addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => OPEN && drawHost(), 200); });
+</script>
+</body>
+</html>

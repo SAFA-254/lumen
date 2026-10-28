@@ -1,0 +1,13 @@
+# снимок с реальными данными кластера
+preview.html
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+# реальные конфиги с токенами
+*.env
+server.json
+agent.json
+
+!examples/
+!examples/*
