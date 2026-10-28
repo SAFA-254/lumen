@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
-проверки сервисов, входы по SSH, статистику PostgreSQL) и отправляет их на сервер.
+проверки сервисов, входы по SSH, статистику PostgreSQL, SMART дисков, ошибки журнала) и отправляет их на сервер.
 Только стандартная библиотека Python."""
 import json
 import os
@@ -10,8 +10,10 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,6 +33,7 @@ CFG = {
     "checks_interval": 30,
     "ssh_interval": 60,
     "pg_interval": 30,
+    "smart_interval": 1800,
     "ca_file": "",            # сертификат сервера Lumen для проверки HTTPS
 }
 if os.path.exists(CONFIG_PATH):
@@ -143,15 +146,33 @@ def net_ifaces():
     return [n for n in names if n != "lo" and not n.startswith(("veth", "docker", "br-", "fw", "tap"))]
 
 
+def link_mbit(n):
+    try:
+        v = int(read(f"/sys/class/net/{n}/speed"))
+    except (OSError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 def net(now):
+    """Суммарные скорости и загрузка самого занятого физического канала в % от его скорости."""
     rx = tx = 0
+    util = link = None
     for n in net_ifaces():
         try:
-            rx += int(read(f"/sys/class/net/{n}/statistics/rx_bytes"))
-            tx += int(read(f"/sys/class/net/{n}/statistics/tx_bytes"))
+            r = int(read(f"/sys/class/net/{n}/statistics/rx_bytes"))
+            t = int(read(f"/sys/class/net/{n}/statistics/tx_bytes"))
         except OSError:
-            pass
-    return C.rate("rx", rx, now), C.rate("tx", tx, now)
+            continue
+        rx += r
+        tx += t
+        speed = None if CONTAINER else link_mbit(n)  # у veth в контейнере скорость условная
+        rr, tr = C.rate("rx:" + n, r, now), C.rate("tx:" + n, t, now)
+        if speed and rr is not None and tr is not None:
+            u = 100.0 * max(rr, tr) * 8 / (speed * 1e6)
+            if util is None or u > util:
+                util, link = u, speed
+    return C.rate("rx", rx, now), C.rate("tx", tx, now), util, link
 
 
 def diskio(now):
@@ -208,7 +229,7 @@ def info():
 def system(now):
     c, io = cpu()
     mt, mu, st, su = memory()
-    rx, tx = net(now)
+    rx, tx, util, link = net(now)
     dr, dw = diskio(now)
     l1, l5, l15 = os.getloadavg()
     m = {
@@ -217,6 +238,7 @@ def system(now):
         "swap": round(100.0 * su / st, 1) if st else 0.0,
         "load1": l1, "load5": l5,
         "net_rx": rx, "net_tx": tx,
+        "net_util": round(util, 1) if util is not None else None, "link_mbit": link,
         "disk_r": dr, "disk_w": dw,
         "temp": temperature(),
     }
@@ -363,6 +385,28 @@ def mod_patroni():
     return out
 
 
+CERT_CACHE = {}  # (host, port) -> (когда проверяли, notAfter)
+
+
+def cert_days(url):
+    """Сколько дней осталось до истечения сертификата HTTPS (раз в час на адрес)."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme != "https" or not u.hostname:
+        return None
+    key = (u.hostname, u.port or 443)
+    hit = CERT_CACHE.get(key)
+    if not hit or time.time() - hit[0] > 3600:
+        ctx = ssl._create_unverified_context()  # срок интересен и у самоподписанных
+        with socket.create_connection(key, timeout=5) as sock, ctx.wrap_socket(sock, server_hostname=u.hostname) as t:
+            der = t.getpeercert(binary_form=True)
+        with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
+            f.write(ssl.DER_cert_to_PEM_cert(der))
+            f.flush()
+            not_after = ssl.cert_time_to_seconds(ssl._ssl._test_decode_cert(f.name)["notAfter"])
+        hit = CERT_CACHE[key] = (time.time(), not_after)
+    return round((hit[1] - time.time()) / 86400, 1)
+
+
 def check_one(c):
     t = c.get("type", "http")
     res = {"name": c["name"], "type": t, "target": c.get("url") or f"{c.get('host')}:{c.get('port', '')}".rstrip(":"),
@@ -404,6 +448,11 @@ def check_one(c):
         res["err"] = (getattr(e, "reason", None) and str(e.reason) or str(e))[:120]
     if res["ok"] and res["ms"] is None:
         res["ms"] = round((time.time() - t0) * 1000, 1)
+    if t == "http" and res["ok"]:
+        try:
+            res["cert_days"] = cert_days(c["url"])
+        except Exception:
+            pass
     return res
 
 
@@ -482,6 +531,94 @@ def mod_ssh():
     return None  # входы уходят отдельным полем ssh_logins
 
 
+# Счётчики SMART, рост которых означает проблему с диском или кабелем
+SMART_COUNTERS = {5: "realloc", 197: "pending", 198: "uncorrectable", 187: "reported_uncorrect", 199: "crc"}
+
+
+def smart_disk(dev):
+    p = subprocess.run(["smartctl", "-j", "-a", "/dev/" + dev], capture_output=True, text=True, timeout=60)
+    d = json.loads(p.stdout)
+    if (d.get("smartctl") or {}).get("exit_status", 0) & 3:  # не открылся или не ответил
+        return None
+    attrs = {a["id"]: a for a in (d.get("ata_smart_attributes") or {}).get("table", [])}
+    ssd = d.get("rotation_rate") == 0
+    out = {"dev": dev, "model": d.get("model_name") or d.get("model_family") or "", "serial": d.get("serial_number"),
+           "size": (d.get("user_capacity") or {}).get("bytes"), "ssd": ssd,
+           "passed": (d.get("smart_status") or {}).get("passed"),
+           "temp": (d.get("temperature") or {}).get("current"),
+           "hours": (d.get("power_on_time") or {}).get("hours"),
+           "err_log": ((d.get("ata_smart_error_log") or {}).get("summary") or {}).get("count")}
+    for aid, name in SMART_COUNTERS.items():
+        if aid in attrs:
+            out[name] = attrs[aid]["raw"]["value"]
+    nv = d.get("nvme_smart_health_information_log")
+    if nv:
+        out["wear"] = nv.get("percentage_used")
+        out["uncorrectable"] = nv.get("media_errors")
+    elif ssd:
+        # остаток ресурса: у разных производителей в разных атрибутах (сырое значение или нормализованное)
+        for aid, raw in ((231, True), (169, True), (202, False), (233, False), (177, False)):
+            a = attrs.get(aid)
+            v = a and (a["raw"]["value"] if raw else a["value"])
+            if a and 0 < v <= 100:
+                out["wear"] = 100 - v
+                break
+    return out
+
+
+def mod_smart():
+    names = [l.split()[0] for l in subprocess.run(["lsblk", "-dno", "NAME,TYPE"], capture_output=True, text=True,
+                                                    timeout=10).stdout.splitlines() if l.endswith(" disk")]
+    disks = []
+    for n in names:
+        if WHOLE_DISK.match(n):
+            try:
+                d = smart_disk(n)
+            except Exception as e:
+                d = {"dev": n, "error": str(e)[:120]}
+            if d:
+                disks.append(d)
+    return {"disks": disks}
+
+
+LOG_STATE = {"cursor": None, "ts": 0, "recent": {}, "rate": None}
+LOG_WINDOW = 3600
+
+
+def mod_logs():
+    """Ошибки (priority err и выше) в журнале: скорость в минуту и самые частые за последний час."""
+    now = time.time()
+    if LOG_STATE["cursor"] is None:
+        _, LOG_STATE["cursor"] = journal(["-n", "0"])
+        LOG_STATE["ts"] = now
+        return None
+    lines, cursor = journal(["--after-cursor", LOG_STATE["cursor"], "-p", "3", "-o", "json", "-n", "2000"])
+    recent = LOG_STATE["recent"]
+    count = 0
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        msg = e.get("MESSAGE")
+        if isinstance(msg, list):  # journald отдаёт не-UTF8 сообщения массивом байт
+            msg = bytes(msg).decode(errors="replace")
+        msg = str(msg or "").strip()
+        ident = e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or "?"
+        ts = int(e.get("__REALTIME_TIMESTAMP", now * 1e6)) / 1e6
+        count += 1
+        r = recent.setdefault((ident, re.sub(r"\d+", "#", msg)[:160]), {"ident": ident, "n": 0})
+        r.update(n=r["n"] + 1, last=ts, msg=msg[:300])
+    if cursor:
+        LOG_STATE["cursor"] = cursor
+    for k in [k for k, r in recent.items() if r["last"] < now - LOG_WINDOW]:
+        del recent[k]
+    LOG_STATE["rate"] = round(count * 60 / max(1.0, now - LOG_STATE["ts"]), 2)
+    LOG_STATE["ts"] = now
+    top = sorted(recent.values(), key=lambda r: (-r["n"], -r["last"]))[:8]
+    return {"hour": sum(r["n"] for r in recent.values()), "top": top}
+
+
 PG_QUERY = """SELECT json_build_object(
   'version', current_setting('server_version'),
   'in_recovery', pg_is_in_recovery(),
@@ -532,8 +669,10 @@ MODULES = {
     "checks": (mod_checks, "checks_interval"),
     "ssh": (mod_ssh, "ssh_interval"),
     "postgres": (mod_postgres, "pg_interval"),
+    "smart": (mod_smart, "smart_interval"),
+    "logs": (mod_logs, "interval"),
 }
-CLUSTER_KEY = {"checks": "checks:{host}", "postgres": "postgres:{host}"}  # у каждого хоста свой ключ
+CLUSTER_KEY = {"checks": "checks:{host}", "postgres": "postgres:{host}", "smart": "smart:{host}", "logs": "logs:{host}"}  # у каждого хоста свой ключ
 
 
 PUSH_CTX = ssl.create_default_context(cafile=CFG["ca_file"]) if CFG["ca_file"] else None
@@ -573,6 +712,9 @@ def main():
                     payload["cluster"][CLUSTER_KEY.get(name, name).format(host=CFG["host"])] = res
             except Exception as e:
                 print(f"module {name}: {e!r}", file=sys.stderr, flush=True)
+        if LOG_STATE["rate"] is not None:
+            payload["metrics"]["log_err"] = LOG_STATE["rate"]
+            LOG_STATE["rate"] = None
         payload["series"] = dict(SERIES)
         SERIES.clear()
         if CFG["checks"]:

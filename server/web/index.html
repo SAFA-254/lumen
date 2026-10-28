@@ -118,6 +118,9 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 .dk .v{font-weight:600;font-size:13px;display:flex;justify-content:space-between;margin-bottom:5px}
 .two{font-size:12px;line-height:1.5;color:var(--muted);white-space:nowrap}
 .two b{color:var(--text);font-weight:500}
+.two .bar{margin-top:4px;width:110px}
+.logmsg{font-family:var(--mono,ui-monospace,monospace);font-size:12px;white-space:normal;word-break:break-word;color:var(--text)}
+.wear{display:inline-flex;align-items:center;gap:6px}.wear .bar{width:54px}
 .hl{display:none;font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
 
 /* guests */
@@ -230,7 +233,7 @@ textarea{font:inherit;font-size:12.5px;color:var(--text);background:var(--surfac
 
 /* wall mode: экран на стене — крупно и без лишнего */
 body.wall{font-size:15px}
-body.wall #maint,body.wall #settings,body.wall #theme,body.wall #userbox,body.wall #guests-p,body.wall #backups-p,body.wall #ssh-p,body.wall #hosts-meta{display:none}
+body.wall #maint,body.wall #settings,body.wall #theme,body.wall #userbox,body.wall #guests-p,body.wall #backups-p,body.wall #ssh-p,body.wall #disks-p,body.wall #hosts-meta{display:none}
 body.wall .kpi .v{font-size:32px}
 body.wall .kpi .l,body.wall .kpi .s{font-size:14px}
 body.wall .banner{font-size:18px;padding:14px 18px}
@@ -285,11 +288,13 @@ body.wall .status{font-size:15px;padding:7px 14px}
       <section class="panel" id="map-p"></section>
       <section class="panel" id="guests-p"></section>
       <section class="panel" id="checks-p"></section>
+      <section class="panel" id="disks-p"></section>
     </div>
     <div class="col" id="col-r">
       <section class="panel" id="events-p"><div class="ph"><h3>События</h3><button class="link" onclick="openDrawer('@history')">история алертов →</button><span class="meta">последние 40</span></div><div class="events" id="events"></div></section>
       <section class="panel" id="ceph-p"></section>
       <section class="panel" id="patroni-p"></section>
+      <section class="panel" id="logs-p"></section>
       <section class="panel" id="backups-p"></section>
       <section class="panel" id="ssh-p"></section>
     </div>
@@ -530,7 +535,7 @@ function renderHosts(d) {
       <div><div class="hl">Память</div><div class="mc"><span class="v">${fmt.pct(m.mem)}<small>%</small></span>${spark(h.spark.mem, memLv ? lvColor(memLv) : css("--c2"), 20)}</div></div>
       <div class="dk" title="${esc(tip)}">
         <div class="hl">Диск</div><div class="v"><span>${(h.disks || []).length > 1 ? "макс." : esc(worst?.mount || "")}</span><span class="num">${dm.toFixed(0)}%</span></div>${bar(dm, 85, 95)}</div>
-      <div class="two"><div class="hl">Сеть</div>↓ <b>${fmt.bits(m.net_rx)}</b><br>↑ <b>${fmt.bits(m.net_tx)}</b></div>
+      <div class="two" ${m.net_util != null ? `title="канал ${m.link_mbit} Мбит/с, занято ${m.net_util.toFixed(0)}%"` : ""}><div class="hl">Сеть</div>↓ <b>${fmt.bits(m.net_rx)}</b><br>↑ <b>${fmt.bits(m.net_tx)}</b>${m.net_util != null ? bar(m.net_util, 70, 90) : ""}</div>
       <div class="two"><div class="hl">Load</div><b>${m.load1 != null ? m.load1.toFixed(2) : "—"}</b>${m.temp != null ? `<br>${m.temp.toFixed(0)} °C` : m.iowait != null ? `<br>io ${m.iowait.toFixed(1)}%` : ""}</div>
     </div>`;
   }).join("");
@@ -593,9 +598,13 @@ function renderChecks(cl) {
   const bad = all.filter(c => !c.ok).length;
   el.innerHTML = panelHead("Сервисы", `<span class="badge ${bad ? "crit" : ""}">${bad ? bad + " не отвечает" : "все отвечают"}</span><button class="link" onclick="openDrawer('@checks')">время ответа →</button>`,
       `с ${esc([...new Set(all.map(c => c.src))].join(", "))} · ${fmt.ago(all[0].age)}`) +
-    `<div class="pb"><div class="checks">${all.map(c => `<div class="chk ${c.ok ? "" : "bad"}" title="${esc(c.type.toUpperCase() + " · " + c.target + (c.code ? " · " + c.code : ""))}">
+    `<div class="pb"><div class="checks">${all.map(c => {
+      const cd = c.cert_days, certLv = cd == null ? "" : cd < 3 ? "crit" : cd < 30 ? "warn" : "";
+      const certTip = cd == null ? "" : ` · сертификат ещё ${cd > 3650 ? "больше 10 лет" : Math.floor(cd) + " дн"}`;
+      return `<div class="chk ${c.ok ? "" : "bad"}" title="${esc(c.type.toUpperCase() + " · " + c.target + (c.code ? " · " + c.code : "") + certTip)}">
       <span class="dot ${c.ok ? "" : "crit"}"></span><span class="n">${esc(c.name)}</span>
-      <span class="ms num">${c.ok ? (c.ms != null ? (c.ms < 10 ? c.ms.toFixed(1) : Math.round(c.ms)) + " мс" : "ok") : esc(c.err || "ошибка")}</span></div>`).join("")}</div></div>`;
+      <span class="ms num">${certLv ? `<span style="color:var(--${certLv})">🔒 ${Math.max(0, Math.floor(cd))} дн</span> · ` : ""}${c.ok ? (c.ms != null ? (c.ms < 10 ? c.ms.toFixed(1) : Math.round(c.ms)) + " мс" : "ok") : esc(c.err || "ошибка")}</span></div>`;
+    }).join("")}</div></div>`;
 }
 
 function renderCeph(c, forecast) {
@@ -666,6 +675,51 @@ function renderBackups(b, pv) {
      <div class="sub-h">Задания vzdump</div><div style="padding-bottom:6px">${tasks || `<div class="empty">нет</div>`}</div>`;
 }
 
+const SMART_LABELS = {realloc: "переназначено", pending: "ждут переназн.", uncorrectable: "нечитаемых", reported_uncorrect: "неисправл.", crc: "CRC"};
+function smartRows(list, withHost) {
+  return list.map(d => {
+    if (d.error) return `<tr>${withHost ? `<td>${esc(d.host)}</td>` : ""}<td>${esc(d.dev)}</td><td colspan="6" class="faint">${esc(d.error)}</td></tr>`;
+    const bad = d.passed === false || d.pending || d.uncorrectable, wear = d.wear;
+    const errs = Object.entries(SMART_LABELS).filter(([k]) => d[k]).map(([k, l]) => `${l} ${d[k]}`).join(", ");
+    return `<tr>${withHost ? `<td><b style="font-weight:600">${esc(d.host)}</b></td>` : ""}<td class="muted">${esc(d.dev)}</td>
+      <td title="${esc("серийный " + (d.serial || "?"))}">${esc(d.model)} <span class="tag">${d.ssd ? "SSD" : "HDD"}</span> <span class="faint">${d.size ? fmt.bytes(d.size, 0) : ""}</span></td>
+      <td class="num" style="color:${d.temp > 55 ? "var(--warn)" : ""}">${d.temp != null ? d.temp + " °C" : "—"}</td>
+      <td class="num muted">${d.hours != null ? (d.hours / 24 / 365).toFixed(1) + " г" : "—"}</td>
+      <td>${wear != null ? `<span class="wear">${bar(wear, 70, 90)}<span class="num muted">${wear}%</span></span>` : `<span class="faint">—</span>`}</td>
+      <td class="muted" style="white-space:normal">${errs ? `<span style="color:${d.pending || d.uncorrectable || d.realloc ? "var(--warn)" : "var(--muted)"}">${esc(errs)}</span>` : "нет"}</td>
+      <td class="r"><span class="badge ${d.passed === false ? "crit" : bad ? "warn" : ""}">${d.passed === false ? "отказ" : bad ? "внимание" : "исправен"}</span></td></tr>`;
+  }).join("");
+}
+const smartHead = withHost => `<tr>${withHost ? "<th>Узел</th>" : ""}<th>Диск</th><th>Модель</th><th>Темп.</th><th>Наработка</th><th>Износ</th><th>Счётчики ошибок</th><th class="r">SMART</th></tr>`;
+
+function renderDisks(cl) {
+  const el = $("#disks-p");
+  const src = Object.entries(cl).filter(([k]) => k.startsWith("smart:"));
+  if (!src.length) { el.innerHTML = panelHead("Диски узлов") + `<div class="empty">нет данных SMART (модуль smart агента)</div>`; return; }
+  const all = src.sort(([a], [b]) => a.localeCompare(b)).flatMap(([k, v]) => (v.disks || []).map(d => ({...d, host: k.slice(6)})));
+  const warn = all.filter(d => d.passed === false || d.pending || d.uncorrectable).length;
+  el.innerHTML = panelHead("Диски узлов", `<span class="badge ${warn ? "warn" : ""}">${warn ? warn + " требуют внимания" : `все ${all.length} исправны`}</span>`,
+      `SMART · ${fmt.ago(Math.min(...src.map(([, v]) => v._age)))}`) +
+    `<div class="tbl"><table>${smartHead(true)}${smartRows(all, true)}</table></div>`;
+}
+
+function logList(top, now, withHost) {
+  return top.map(e => `<div class="ev"><time class="num">${fmt.time(e.last, now - e.last > 86400)}</time><span class="dot warn"></span>
+    <span>${withHost ? `<b style="font-weight:600">${esc(e.host)}</b> · ` : ""}<span class="muted">${esc(e.ident)}</span>${e.n > 1 ? ` <span class="faint">×${e.n}</span>` : ""}<div class="logmsg">${esc(e.msg)}</div></span></div>`).join("");
+}
+function renderLogs(cl, now) {
+  const el = $("#logs-p");
+  const src = Object.entries(cl).filter(([k]) => k.startsWith("logs:"));
+  if (!src.length) { el.innerHTML = panelHead("Ошибки в журналах") + `<div class="empty">нет данных (модуль logs агента)</div>`; return; }
+  const per = src.map(([k, v]) => [k.slice(5), v.hour || 0]).sort((a, b) => b[1] - a[1]);
+  const total = per.reduce((a, [, n]) => a + n, 0);
+  const top = src.flatMap(([k, v]) => (v.top || []).map(e => ({...e, host: k.slice(5)}))).sort((a, b) => b.n - a.n || b.last - a.last).slice(0, 6);
+  el.innerHTML = panelHead("Ошибки в журналах", total ? `<span class="badge warn">${total} за час</span>` : `<span class="badge">нет</span>`, "уровень err и выше · 1 ч") +
+    (total ? `<div class="pb" style="padding-bottom:6px;display:flex;flex-wrap:wrap;gap:6px">${per.filter(([, n]) => n).map(([h, n]) => `<span class="badge mute" style="cursor:pointer" data-host="${esc(h)}">${esc(h)} ${n}</span>`).join("")}</div>
+      <div style="padding-bottom:6px">${logList(top, now, true)}</div>` : `<div class="empty">За последний час ошибок нет ни на одном хосте</div>`);
+  el.querySelectorAll("[data-host]").forEach(b => b.onclick = () => openDrawer(b.dataset.host));
+}
+
 function renderSSH(logins, now) {
   const el = $("#ssh-p");
   const groups = [];
@@ -715,13 +769,15 @@ function render(d) {
   renderPatroni(d.cluster.patroni, d.cluster);
   renderBackups(d.cluster.backups, d.cluster.pve);
   renderSSH(d.logins || [], d.now);
+  renderDisks(d.cluster);
+  renderLogs(d.cluster, d.now);
   $("#events").innerHTML = d.events.map(e => `<div class="ev"><time class="num">${fmt.time(e.ts, d.now - e.ts > 86400)}</time><span class="dot ${e.level}"></span><span>${esc(e.msg)}</span></div>`).join("") || `<div class="empty">пока тихо</div>`;
   balance();
 }
 
-/* Выравнивание колонок: бэкапы и входы по SSH переезжают в левую колонку, если правая заметно длиннее */
+/* Выравнивание колонок: ошибки журналов, бэкапы и входы по SSH переезжают в левую колонку, если правая заметно длиннее */
 function balance() {
-  const L = $("#col-l"), R = $("#col-r"), movable = [$("#backups-p"), $("#ssh-p")];
+  const L = $("#col-l"), R = $("#col-r"), movable = [$("#logs-p"), $("#backups-p"), $("#ssh-p")];
   movable.forEach(p => R.append(p));
   if (getComputedStyle(L.parentNode).gridTemplateColumns.split(" ").length < 2) return;
   const gap = 16;
@@ -785,11 +841,12 @@ async function drawHost() {
       <div class="stat"><div class="l">Память</div><div class="v num">${fmt.bytes(m.mem_used)} / ${fmt.bytes(m.mem_total)}</div></div>
       <div class="stat"><div class="l">Прогноз диска</div><div class="v num" style="font-size:13px">${fc.length ? fc.map(f => `${esc(f.target)}: ${fcText(f)}`).join("<br>") : "мало истории"}</div></div>
     </div>
-    <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ["disk", m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"]]
-        .map(([id, t]) => chartBox(id, t)).join("")}</div>`;
+    <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ["disk", m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"],
+        ...(m.net_util != null ? [["netu", `Загрузка канала ${m.link_mbit} Мбит/с`]] : []), ...(m.log_err != null ? [["logs", "Ошибки в журнале, в минуту"]] : [])]
+        .map(([id, t]) => chartBox(id, t)).join("")}</div>${hostExtras(name)}`;
   bindDrawer();
   CHARTS = [];
-  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", ...disks];
+  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", "net_util", "log_err", ...disks];
   const r = await getJSON(`api/history?host=${encodeURIComponent(name)}&${rangeQS()}&scope=${encodeURIComponent("host:" + name)}&metrics=${encodeURIComponent(metrics.join(","))}`);
   if (OPEN != name) return;
   const S = (key, label, color, fill) => ({name: label, color, fill, points: r[key]?.points || [], step: r[key]?.step});
@@ -801,6 +858,15 @@ async function drawHost() {
   drawSeries("io", [S("disk_r", "чтение", C[0], true), S("disk_w", "запись", C[3])], {fmt: fmt.rate, ann});
   drawSeries("load", [S("load1", "1 мин", C[4], true)], {fmt: v => v.toFixed(1), ann});
   drawSeries("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
+  if (m.net_util != null) drawSeries("netu", [S("net_util", "занято канала", C[2], true)], pct);
+  if (m.log_err != null) drawSeries("logs", [S("log_err", "ошибок в минуту", C[3], true)], {fmt: v => v.toFixed(1), minMax: 1, ann});
+}
+function hostExtras(name) {
+  const sm = DATA.cluster["smart:" + name], lg = DATA.cluster["logs:" + name];
+  let out = "";
+  if (sm?.disks?.length) out += `<div class="panel" style="margin-top:12px">${panelHead("Диски (SMART)", "", fmt.ago(sm._age))}<div class="tbl"><table>${smartHead(false)}${smartRows(sm.disks, false)}</table></div></div>`;
+  if (lg) out += `<div class="panel" style="margin-top:12px">${panelHead("Частые ошибки в журнале", lg.hour ? `<span class="badge warn">${lg.hour} за час</span>` : "", "последний час")}${lg.top?.length ? `<div style="padding-bottom:6px">${logList(lg.top, DATA.now, false)}</div>` : `<div class="empty">ошибок нет</div>`}</div>`;
+  return out;
 }
 
 async function drawVM(vmid) {
@@ -944,6 +1010,7 @@ function renderSettings(msg, isErr) {
 
     <div class="sect">Утренняя сводка в Telegram</div>
     <div class="field" style="max-width:320px"><label for="sumtime">Время отправки (ЧЧ:ММ, пусто — не отправлять)</label><input id="sumtime" value="${esc(s.settings.summary_time)}" placeholder="09:00"></div>
+    <label class="muted" style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="weekly" ${s.settings.weekly_report ? "checked" : ""}> По понедельникам в это же время присылать итоги недели (команда /week)</label>
 
     <div class="sect">Известные адреса для SSH</div>
     <div class="muted" style="font-size:12.5px;margin-bottom:8px">Вход по SSH с адреса не из этого списка сразу приходит в Telegram. По одному адресу или подсети (например 192.168.3.0/24) на строку.</div>
@@ -963,7 +1030,7 @@ function renderSettings(msg, isErr) {
     const body = {
       rules: Object.fromEntries([...document.querySelectorAll("[data-rule]")].map(i => [i.dataset.rule, +i.value])),
       checks: readChecks(), checks_runner: $("#runner").value,
-      summary_time: $("#sumtime").value.trim(), ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
+      summary_time: $("#sumtime").value.trim(), weekly_report: $("#weekly").checked, ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
     };
     try { SET = await api("api/settings", body); renderSettings("Сохранено"); refresh(); }
     catch (e) { s.checks = body.checks; renderSettings(e.message, true); }

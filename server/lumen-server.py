@@ -63,13 +63,26 @@ RULES_META = {
     "etcd_fsync_ms": (100, "fsync etcd больше", "мс", 1, 10000),
     "osd_latency_ms": (250, "Задержка записи OSD больше", "мс", 1, 100000),
     "forecast_days": (14, "Предупреждать, если диск заполнится через", "дн", 1, 365),
+    "net_util_pct": (80, "Загрузка сетевого канала выше", "%", 10, 100),
+    "net_for_sec": (300, "…дольше", "с", 0, 7200),
+    "log_err_per_min": (5, "Ошибок в журнале больше", "в мин", 0.1, 100000),
+    "log_for_sec": (300, "…дольше", "с", 0, 7200),
+    "smart_wear_pct": (80, "Износ SSD больше", "%", 1, 100),
+    "smart_temp_c": (60, "Температура диска выше", "°C", 30, 100),
+    "cert_days": (14, "Сертификат HTTPS истекает раньше чем через", "дн", 1, 365),
+    "remind_h": (4, "Напоминать о незакрытом алерте каждые (0 — нет)", "ч", 0, 168),
 }
 DEFAULT_SETTINGS = {
     "summary_time": "09:00",
+    "weekly_report": True,
     "checks_runner": "pve1",
     "ssh_known": [],
 }
 
+# счётчики SMART, рост которых сообщается сразу
+SMART_NAMES = {"realloc": "переназначенных секторов", "pending": "секторов ждут переназначения",
+               "uncorrectable": "нечитаемых секторов", "reported_uncorrect": "неисправленных ошибок",
+               "crc": "ошибок CRC (кабель SATA)"}
 ROLLUP_STEP = 300
 SERIES_MIN_GAP = 20  # кластерные ряды присылают несколько агентов — пишем не чаще раза в 20 с
 SILENCE_SCOPES = ("all", "ceph", "patroni", "checks", "backups", "ssh")
@@ -379,9 +392,9 @@ class Alerts:
             return True
         kind, _, rest = key.partition(":")
         if scope.startswith("host:"):
-            return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc") and \
+            return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc", "net", "logs", "smart") and \
                 rest.split(":")[0] == scope[5:]
-        kinds = {"ceph": ("ceph",), "patroni": ("pg", "etcd", "etcdlat", "pgdb"), "checks": ("chk",),
+        kinds = {"ceph": ("ceph",), "patroni": ("pg", "etcd", "etcdlat", "pgdb"), "checks": ("chk", "cert"),
                  "backups": ("bk",), "ssh": ("ssh",)}
         return kind in kinds.get(scope, ())
 
@@ -445,6 +458,12 @@ class Alerts:
                 found[f"mem:{name}"] = ("warn", f"{name}: RAM {m['mem']:.0f}%", r["mem_for_sec"])
             if m.get("temp", 0) > r["temp_c"]:
                 found[f"temp:{name}"] = ("warn", f"{name}: температура {m['temp']:.0f}°C", 60)
+            if m.get("net_util", 0) > r["net_util_pct"]:
+                found[f"net:{name}"] = ("warn", f"{name}: сеть загружена на {m['net_util']:.0f}% "
+                                                f"(канал {m.get('link_mbit', '?')} Мбит/с)", r["net_for_sec"])
+            if m.get("log_err", 0) > r["log_err_per_min"]:
+                found[f"logs:{name}"] = ("warn", f"{name}: {m['log_err']:.0f} ошибок в журнале в минуту",
+                                         r["log_for_sec"])
             for d in lt.get("disks") or []:
                 pct = 100.0 * d["used"] / d["size"] if d.get("size") else 0
                 if pct > r["disk_warn_pct"]:
@@ -519,6 +538,13 @@ class Alerts:
                         found[f"chk:{c['name']}"] = ("crit", f"Проверка «{c['name']}» не прошла: "
                                                              f"{c.get('err') or 'ошибка'} ({c['target']}, с {src})",
                                                      r["check_for_sec"])
+                    cd = c.get("cert_days")
+                    if c.get("ok") and cd is not None and cd < r["cert_days"]:
+                        found[f"cert:{c['name']}"] = ("crit" if cd < 3 else "warn",
+                                                      f"Сертификат «{c['name']}» истекает через {max(0, cd):.0f} дн "
+                                                      f"({c['target']})", 0)
+            if kind.startswith("smart:") and now - ts <= 3 * 3600:
+                self.smart(kind[6:], data, r, found)
             if kind.startswith("postgres:") and now - ts <= r["cluster_stale_sec"]:
                 h = kind[9:]
                 if data.get("error"):
@@ -563,6 +589,7 @@ class Alerts:
                     found[f"bk:{g['vmid']}"] = ("warn", f"Бэкап {g['vmid']} {g.get('name', '')}: "
                                                         f"последний {int((now - g['last']) / 3600)} ч назад", 0)
 
+        # напоминания о долгих алертах считаются ниже, при отправке
         # учёт времени удержания
         fired = {}
         for key, (lvl, msg, hold) in found.items():
@@ -601,6 +628,10 @@ class Alerts:
                     # обслуживание закончилось, а проблема осталась
                     self.notify(icon(lvl) + msg + " (после обслуживания)")
                     old["notified"] = True
+                    old["reminded"] = now
+                elif not muted and r["remind_h"] and now - old.get("reminded", old["since"]) >= r["remind_h"] * 3600:
+                    self.notify(f"⏰ Всё ещё: {msg} (длится {fmt_dur(now - old['since'])})")
+                    old["reminded"] = now
                 old.update(level=lvl, msg=msg)
         for key in list(self.active):
             if key not in fired:
@@ -612,6 +643,36 @@ class Alerts:
                 if a.get("notified", True) and not self.silenced(key):
                     self.notify(f"✅ Решено: {a['msg']} (длилось {dur} мин)")
         S.meta_set("alerts", self.active)
+
+
+    def smart(self, host, data, r, found):
+        """Алерты по SMART одного узла и мгновенное сообщение, если вырос счётчик ошибок диска."""
+        base = S.meta_get("smart_base", {})
+        for d in data.get("disks", []):
+            if d.get("error"):
+                continue
+            dk = f"{host}:{d['dev']}"
+            label = f"{host}: диск {d['dev']} ({d.get('model') or '?'})"
+            if d.get("passed") is False:
+                found[f"smart:{dk}:fail"] = ("crit", f"{label}: SMART-тест не пройден", 0)
+            bad = [f"{d[c]} {SMART_NAMES[c]}" for c in ("pending", "uncorrectable") if d.get(c)]
+            if bad:
+                found[f"smart:{dk}:sect"] = ("warn", f"{label}: " + ", ".join(bad), 0)
+            if (d.get("wear") or 0) >= r["smart_wear_pct"]:
+                found[f"smart:{dk}:wear"] = ("warn", f"{label}: износ {d['wear']}%", 0)
+            if (d.get("temp") or 0) > r["smart_temp_c"]:
+                found[f"smart:{dk}:temp"] = ("warn", f"{label}: температура {d['temp']}°C", 300)
+            sid = d.get("serial") or dk
+            prev = base.get(sid, {})
+            grown = [f"{SMART_NAMES[c]}: {prev[c]} → {d[c]}" for c in SMART_NAMES
+                     if isinstance(d.get(c), int) and isinstance(prev.get(c), int) and d[c] > prev[c]]
+            if grown:
+                text = f"{label}: выросли счётчики SMART — " + "; ".join(grown)
+                event("warn", text)
+                if not self.silenced(f"smart:{dk}"):
+                    self.notify("💽 " + text)
+            base[sid] = {c: d.get(c) for c in SMART_NAMES}
+        S.meta_set("smart_base", base)
 
 
 def scope_label(scope):
@@ -742,6 +803,70 @@ def morning_summary():
     return "\n".join(out)
 
 
+def weekly_report():
+    now = time.time()
+    week = now - 7 * 86400
+    out = [f"📅 Lumen: итоги недели ({time.strftime('%d.%m', time.localtime(week))}–{time.strftime('%d.%m')})", ""]
+    # 5-минутные корзины, где были данные хоть от кого-то, — время, когда работал сам Lumen;
+    # доступность хоста считается только по этому времени, чтобы простой Lumen не записывался хостам
+    done = S.meta_get("rollup_ts", int(now))
+    buckets = {}
+    for h, ts in S.q("SELECT host, ts FROM roll WHERE metric='cpu' AND ts > ? "
+                     "AND host NOT LIKE '\\_%' ESCAPE '\\'", (int(week),)):
+        buckets.setdefault(h, set()).add(ts)
+    if buckets:
+        up = set().union(*buckets.values())
+        total = max(1, (done - min(up)) / ROLLUP_STEP)
+        own = min(100.0, 100.0 * len(up) / total)
+        hosts = []
+        for h, b in sorted(buckets.items()):
+            first = min(b)
+            hosts.append(f"{h} {100.0 * len(b) / max(1, sum(1 for t in up if t >= first)):.1f}%")
+        out.append(f"Lumen собирал данные {own:.1f}% времени" + (" — были перерывы" if own < 99.5 else ""))
+        out.append("Доступность хостов: " + ", ".join(hosts))
+    hist = alert_history(7)
+    if hist["summary"]:
+        n = sum(a["count"] for a in hist["summary"])
+        crit = sum(1 for a in hist["items"] if a["level"] == "crit")
+        out.append(f"Алертов за неделю: {n} (критичных {crit}), чаще всего:")
+        for a in hist["summary"][:5]:
+            out.append(f"  {'🔴' if a['level'] == 'crit' else '🟡'} {a['msg']} — ×{a['count']}, всего {fmt_dur(a['total'])}")
+    else:
+        out.append("Алертов за неделю не было 🎉")
+    growth = []
+    for h, m, v0, v1 in S.q("""SELECT host, metric,
+            (SELECT v FROM roll r2 WHERE r2.host=r.host AND r2.metric=r.metric AND ts > ? ORDER BY ts LIMIT 1),
+            (SELECT v FROM roll r2 WHERE r2.host=r.host AND r2.metric=r.metric ORDER BY ts DESC LIMIT 1)
+            FROM roll r WHERE ts > ? AND (metric LIKE 'disk:%' OR (host='_ceph' AND metric='used_pct'))
+            GROUP BY host, metric""", (int(week), int(week))):
+        if v0 is not None and v1 is not None and abs(v1 - v0) >= 0.5:
+            where = "Ceph" if h == "_ceph" else f"{h} {m[5:]}"
+            growth.append(f"{where} {v0:.0f}→{v1:.0f}% ({v1 - v0:+.1f})")
+    out.append("Заполнение дисков: " + ("; ".join(growth) if growth else "заметно не изменилось"))
+    peaks = S.q("SELECT host, MAX(vmax) FROM roll WHERE metric='net_util' AND ts > ? GROUP BY host ORDER BY host",
+                (int(week),))
+    if peaks:
+        out.append("Пик загрузки сети: " + ", ".join(f"{h} {v:.0f}%" for h, v in peaks))
+    errs = [(h, v * ROLLUP_STEP / 60) for h, v in S.q("SELECT host, SUM(v) FROM roll WHERE metric='log_err' AND ts > ? "
+                                                        "GROUP BY host ORDER BY 2 DESC", (int(week),)) if v]
+    if errs:
+        out.append("Ошибок в журналах (примерно): " + ", ".join(f"{h} {n:.0f}" for h, n in errs[:6] if n >= 1))
+    c = {k: json.loads(v) for k, v in S.q("SELECT kind, data FROM cluster WHERE kind='backups'")}
+    if "backups" in c:
+        tasks = [t for t in c["backups"].get("tasks", []) if t["starttime"] > week]
+        bad = [t for t in tasks if t.get("status") not in (None, "OK")]
+        out.append(f"Бэкапы: заданий {len(tasks)}, с ошибкой {len(bad)}")
+    (unk,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ? AND known=0", (week,))
+    (tot,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ?", (week,))
+    out.append(f"Входы по SSH: {tot}" + (f", с незнакомых адресов {unk}" if unk else ", все с известных адресов"))
+    fc = [f for f in forecasts() if f["days"] is not None]
+    if fc:
+        f = min(fc, key=lambda f: f["days"])
+        out.append(f"Ближе всего к заполнению: {'Ceph' if f['host'] == '_ceph' else f['host'] + ' ' + f['target']} "
+                   f"— примерно через {f['days']:.0f} дн")
+    return "\n".join(out)
+
+
 def maybe_send_summary():
     st = settings()
     if not st.get("summary_time"):
@@ -750,6 +875,11 @@ def maybe_send_summary():
     if time.strftime("%H:%M") >= st["summary_time"] and S.meta_get("summary_date") != today:
         S.meta_set("summary_date", today)
         ALERTS.notify(morning_summary())
+    # по понедельникам — ещё и итоги недели
+    if st.get("weekly_report") and time.localtime().tm_wday == 0 and time.strftime("%H:%M") >= st["summary_time"] \
+            and S.meta_get("weekly_date") != today:
+        S.meta_set("weekly_date", today)
+        ALERTS.notify(weekly_report())
 
 
 # ---------------------------------------------------------------- telegram bot
@@ -759,7 +889,8 @@ HELP = """Команды Lumen:
 /alerts — активные алерты
 /mute <что> <на сколько> [причина] — обслуживание. Что: all, ceph, patroni, checks, backups, ssh или имя хоста. Время: 30m, 2h, 1d
 /unmute [all] — снять обслуживание
-/summary — сводка за сутки"""
+/summary — сводка за сутки
+/week — итоги недели"""
 
 
 def parse_minutes(s):
@@ -780,6 +911,8 @@ def bot_command(text, who):
         return status_text()
     if cmd == "/summary":
         return morning_summary()
+    if cmd == "/week":
+        return weekly_report()
     if cmd == "/alerts":
         act = sorted(ALERTS.active.items(), key=lambda kv: kv[1]["since"])
         if not act:
@@ -1031,6 +1164,8 @@ def save_settings(body):
         if t and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
             raise ValueError("время сводки в формате ЧЧ:ММ или пусто, чтобы выключить")
         st["summary_time"] = t
+    if "weekly_report" in body:
+        st["weekly_report"] = bool(body["weekly_report"])
     if "checks_runner" in body:
         st["checks_runner"] = str(body["checks_runner"])[:64]
     if "ssh_known" in body:
