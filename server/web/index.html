@@ -685,8 +685,8 @@ function smartRows(list, withHost) {
       <td title="${esc("серийный " + (d.serial || "?"))}">${esc(d.model)} <span class="tag">${d.ssd ? "SSD" : "HDD"}</span> <span class="faint">${d.size ? fmt.bytes(d.size, 0) : ""}</span></td>
       <td class="num" style="color:${d.temp > 55 ? "var(--warn)" : ""}">${d.temp != null ? d.temp + " °C" : "—"}</td>
       <td class="num muted">${d.hours != null ? (d.hours / 24 / 365).toFixed(1) + " г" : "—"}</td>
-      <td>${wear != null ? `<span class="wear">${bar(wear, 70, 90)}<span class="num muted">${wear}%</span></span>` : `<span class="faint">—</span>`}</td>
-      <td class="muted" style="white-space:normal">${errs ? `<span style="color:${d.pending || d.uncorrectable || d.realloc ? "var(--warn)" : "var(--muted)"}">${esc(errs)}</span>` : "нет"}</td>
+      <td>${wear != null ? `<span class="wear">${bar(wear, 70, 90)}<span class="num muted">${wear}%</span></span>` : `<span class="faint" title="Износ от записи бывает только у SSD">${d.ssd ? "не сообщает" : "не бывает у HDD"}</span>`}</td>
+      <td class="muted" style="white-space:normal" title="${esc(Object.entries(SMART_LABELS).filter(([k]) => d[k] != null).map(([k, l]) => `${l}: ${d[k]}`).join("\n"))}">${errs ? `<span style="color:${d.pending || d.uncorrectable || d.realloc ? "var(--warn)" : "var(--muted)"}">${esc(errs)}</span>` : `<span style="color:var(--ok)">все по нулям</span>`}</td>
       <td class="r"><span class="badge ${d.passed === false ? "crit" : bad ? "warn" : ""}">${d.passed === false ? "отказ" : bad ? "внимание" : "исправен"}</span></td></tr>`;
   }).join("");
 }
