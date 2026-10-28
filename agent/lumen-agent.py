@@ -293,12 +293,15 @@ ETCD_METRICS = ("etcd_disk_wal_fsync_duration_seconds_sum", "etcd_disk_wal_fsync
 
 
 def avg_ms(key, total, count):
-    """Средняя длительность операции за интервал по разнице счётчиков _sum/_count."""
+    """Средняя длительность операции по разнице счётчиков _sum/_count.
+    Возвращает (значение, свежее ли оно). Если операций с прошлого раза не было
+    (etcd простаивает), отдаёт последнее известное значение с fresh=False."""
     p = C.prev.get(key)
-    C.prev[key] = (total, count)
-    if not p or count <= p[1]:
-        return None
-    return round((total - p[0]) / (count - p[1]) * 1000, 2)
+    if p and count == p[1]:
+        return p[2], False
+    avg = round((total - p[0]) / (count - p[1]) * 1000, 2) if p and count > p[1] else None
+    C.prev[key] = (total, count, avg)
+    return avg, avg is not None
 
 
 def mod_patroni():
@@ -329,15 +332,14 @@ def mod_patroni():
         try:
             with urllib.request.urlopen(url.rstrip("/") + "/metrics", timeout=5) as r:
                 pm = prom_values(r.read().decode(), ETCD_METRICS)
-            st["fsync_ms"] = avg_ms("fsync:" + ip, pm["etcd_disk_wal_fsync_duration_seconds_sum"],
-                                    pm["etcd_disk_wal_fsync_duration_seconds_count"])
-            st["commit_ms"] = avg_ms("commit:" + ip, pm["etcd_disk_backend_commit_duration_seconds_sum"],
-                                     pm["etcd_disk_backend_commit_duration_seconds_count"])
+            for k, name in (("fsync", "wal_fsync"), ("commit", "backend_commit")):
+                v, fresh = avg_ms(f"{k}:{ip}", pm[f"etcd_disk_{name}_duration_seconds_sum"],
+                                  pm[f"etcd_disk_{name}_duration_seconds_count"])
+                st[k + "_ms"] = v
+                if fresh:  # на график — только интервалы, где были операции
+                    pts[f"{k}:{ip}"] = v
             st["leader_changes"] = int(pm.get("etcd_server_leader_changes_seen_total", 0))
             st["has_leader"] = pm.get("etcd_server_has_leader") == 1
-            for k in ("fsync_ms", "commit_ms"):
-                if st[k] is not None:
-                    pts[k.split("_")[0] + ":" + ip] = st[k]
         except Exception:
             pass  # /metrics может быть закрыт — тогда только health
         etcd[ep] = st
