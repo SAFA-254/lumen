@@ -1,0 +1,13 @@
+[
+  {"name": "Nextcloud", "type": "http", "url": "http://192.168.3.10/status.php", "expect_text": "installed"},
+  {"name": "PVE pve1", "type": "http", "url": "https://192.168.3.3:8006/", "insecure": true},
+  {"name": "PVE pve2", "type": "http", "url": "https://192.168.3.4:8006/", "insecure": true},
+  {"name": "PVE pve3", "type": "http", "url": "https://192.168.3.5:8006/", "insecure": true},
+  {"name": "PBS", "type": "http", "url": "https://192.168.3.4:8007/", "insecure": true},
+  {"name": "Grafana", "type": "http", "url": "http://192.168.3.27:3000/api/health"},
+  {"name": "Loki", "type": "http", "url": "http://192.168.3.35:3100/ready"},
+  {"name": "Zabbix", "type": "http", "url": "http://192.168.3.6/"},
+  {"name": "nextcloud-db", "type": "ping", "host": "192.168.3.11"},
+  {"name": "nextcloud-db2", "type": "ping", "host": "192.168.3.32"},
+  {"name": "cartridge", "type": "ping", "host": "192.168.3.7"}
+]

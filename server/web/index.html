@@ -9,21 +9,21 @@
 :root{
   --bg:#0b0d12; --panel:#12151c; --panel2:#171b24; --line:#232836; --text:#e6e8ee; --muted:#8a91a3; --faint:#5b6275;
   --ok:#34d399; --warn:#fbbf24; --crit:#f87171; --info:#60a5fa;
-  --c1:#60a5fa; --c2:#a78bfa; --c3:#34d399; --c4:#f472b6; --c5:#fbbf24;
+  --c1:#60a5fa; --c2:#a78bfa; --c3:#34d399; --c4:#f472b6; --c5:#fbbf24; --c6:#22d3ee; --c7:#fb923c; --c8:#94a3b8;
   --radius:14px; --shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.25);
 }
 @media (prefers-color-scheme: light){
   :root:not([data-theme="dark"]){
     --bg:#f4f5f8; --panel:#ffffff; --panel2:#f7f8fb; --line:#e3e6ee; --text:#151821; --muted:#5d6475; --faint:#9aa1b2;
     --ok:#059669; --warn:#d97706; --crit:#dc2626; --info:#2563eb;
-    --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706;
+    --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706; --c6:#0891b2; --c7:#ea580c; --c8:#64748b;
     --shadow:0 1px 2px rgba(16,24,40,.05), 0 4px 16px rgba(16,24,40,.05);
   }
 }
 :root[data-theme="light"]{
   --bg:#f4f5f8; --panel:#ffffff; --panel2:#f7f8fb; --line:#e3e6ee; --text:#151821; --muted:#5d6475; --faint:#9aa1b2;
   --ok:#059669; --warn:#d97706; --crit:#dc2626; --info:#2563eb;
-  --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706;
+  --c1:#2563eb; --c2:#7c3aed; --c3:#059669; --c4:#db2777; --c5:#d97706; --c6:#0891b2; --c7:#ea580c; --c8:#64748b;
   --shadow:0 1px 2px rgba(16,24,40,.05), 0 4px 16px rgba(16,24,40,.05);
 }
 *{box-sizing:border-box}
@@ -118,6 +118,24 @@ td.r,th.r{text-align:right}
 .tip div{display:flex;justify-content:space-between;gap:14px}
 .tip .t{color:var(--muted);margin-bottom:3px}
 .info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.alert.muted{opacity:.6}
+.silence{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:12px;background:color-mix(in srgb,var(--info) 10%,var(--panel));border:1px solid color-mix(in srgb,var(--info) 35%,var(--line))}
+.silence button{margin-left:auto;padding:3px 10px;font-size:12px}
+.link{background:none;border:0;padding:0;color:var(--info);cursor:pointer;font-size:12px}
+.link:hover{text-decoration:underline}
+.checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.chk{display:grid;grid-template-columns:10px 1fr auto;gap:4px 10px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:10px 12px}
+.chk.bad{border-color:color-mix(in srgb,var(--crit) 45%,var(--line));background:color-mix(in srgb,var(--crit) 8%,var(--panel2))}
+.chk .n{font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chk .t{grid-column:2/-1;color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.modal{position:fixed;left:50%;top:12vh;transform:translateX(-50%);width:min(460px,calc(100% - 32px));z-index:12;padding:20px;display:none}
+.modal.open{display:block}
+.modal h3{margin:0 0 14px;font-size:16px}
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field label{font-size:12px;color:var(--muted)}
+select,input{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.row-end{display:flex;justify-content:flex-end;gap:8px}
 @media (max-width:900px){
   .grid2,.charts{grid-template-columns:1fr}
   .stats,.info-grid{grid-template-columns:repeat(2,1fr)}
@@ -134,13 +152,18 @@ td.r,th.r{text-align:right}
     <span class="pill" id="summary"><span class="dot"></span>загрузка…</span>
     <div class="spacer"></div>
     <span class="pill num" id="updated">—</span>
+    <button id="maint">🔕 Обслуживание</button>
     <button id="theme" title="Тема">◐</button>
   </header>
 
+  <div class="alerts" id="silences" style="margin-bottom:8px"></div>
   <div class="alerts" id="alerts"></div>
 
   <h2>Хосты</h2>
   <div class="hosts" id="hosts"></div>
+
+  <h2>Сервисы</h2>
+  <div class="card panel" id="checks"></div>
 
   <div class="grid2" style="margin-top:28px">
     <div class="card panel" id="ceph"></div>
@@ -159,6 +182,14 @@ td.r,th.r{text-align:right}
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer"><div class="drawer-in" id="drawer-in"></div></aside>
 <div class="tip" id="tip"></div>
+<div class="card modal" id="modal">
+  <h3>Режим обслуживания</h3>
+  <div class="muted" style="font-size:13px;margin:-6px 0 14px">Алерты по выбранной части продолжают отображаться, но в Telegram не отправляются. Если проблема останется после окончания, уведомление придёт.</div>
+  <div class="field"><label>Что заглушить</label><select id="m-scope"></select></div>
+  <div class="field"><label>На сколько</label><div class="chips" id="m-dur"></div></div>
+  <div class="field"><label>Причина (необязательно)</label><input id="m-reason" maxlength="200" placeholder="например, обновление ядра"></div>
+  <div class="row-end"><button id="m-cancel">Отмена</button><button class="on" id="m-ok">Включить</button></div>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -306,10 +337,10 @@ function renderCeph(c) {
   const hl = c.health == "HEALTH_OK" ? "" : c.health == "HEALTH_ERR" ? "crit" : "warn";
   const used = c.bytes.used / c.bytes.total * 100;
   const pgs = c.pgs.states.map(s => `<span class="badge ${s.state_name == "active+clean" ? "" : "warn"}">${s.count} ${esc(s.state_name)}</span>`).join(" ");
-  el.innerHTML = `<div class="panel-h"><h3>Ceph</h3><span class="badge ${hl}">${esc(c.health)}</span><span class="meta">${fmt.ago(c._age)}</span></div>
+  el.innerHTML = `<div class="panel-h"><h3>Ceph</h3><span class="badge ${hl}">${esc(c.health)}</span><button class="link" onclick="openCluster('ceph')">графики задержек →</button><span class="meta">${fmt.ago(c._age)}</span></div>
     ${c.checks.map(x => `<div class="alert ${x.severity == "HEALTH_ERR" ? "crit" : ""}" style="margin-bottom:8px">${esc(x.msg)}</div>`).join("")}
     <div class="stats">
-      <div class="stat"><div class="m-label">OSD</div><div class="m-val num">${c.osd.up}/${c.osd.total}</div><div class="muted" style="font-size:12px">up · ${c.osd.in} in</div></div>
+      <div class="stat"><div class="m-label">OSD</div><div class="m-val num">${c.osd.up}/${c.osd.total}</div><div class="muted" style="font-size:12px">up · ${c.osd.in} in${c.osd_lat && Object.keys(c.osd_lat).length ? ` · до ${Math.max(...Object.values(c.osd_lat))} мс` : ""}</div></div>
       <div class="stat"><div class="m-label">MON</div><div class="m-val num">${c.mons.length}</div><div class="muted" style="font-size:12px">${esc(c.mons.join(", "))}</div></div>
       <div class="stat"><div class="m-label">Чтение</div><div class="m-val num" style="font-size:15px">${fmt.rate(c.io.rd)}</div><div class="muted" style="font-size:12px">${c.io.rd_ops} оп/с</div></div>
       <div class="stat"><div class="m-label">Запись</div><div class="m-val num" style="font-size:15px">${fmt.rate(c.io.wr)}</div><div class="muted" style="font-size:12px">${c.io.wr_ops} оп/с</div></div>
@@ -333,8 +364,9 @@ function renderPatroni(p) {
       <td class="r num">${m.role == "leader" ? "—" : m.lag == null ? "—" : fmt.bytes(m.lag)}</td></tr>`).join("");
   const etcd = Object.entries(p.etcd || {}).map(([ep, s]) => `<div class="stat"><div class="m-label">etcd ${esc(ep.split(":")[0])}</div>
       <div style="display:flex;align-items:center;gap:8px;margin-top:4px"><span class="dot ${s.ok ? "" : "crit"}"></span><b>${s.ok ? "healthy" : "fail"}</b><span class="muted num" style="margin-left:auto;font-size:12px">${s.ms != null ? s.ms + " мс" : ""}</span></div>
+      ${s.fsync_ms != null ? `<div class="muted num" style="font-size:12px;margin-top:4px">fsync <b style="color:${s.fsync_ms > 100 ? "var(--warn)" : "var(--text)"}">${s.fsync_ms.toFixed(1)} мс</b> · commit ${s.commit_ms != null ? s.commit_ms.toFixed(1) : "—"} мс</div>` : ""}
       ${s.ok ? "" : `<div class="muted" style="font-size:11px;margin-top:4px">${esc(s.err)}</div>`}</div>`).join("");
-  el.innerHTML = `<div class="panel-h"><h3>PostgreSQL · Patroni</h3><span class="badge ${ok ? "" : "crit"}">${ok ? "OK" : "проблема"}</span><span class="meta">${esc(p.scope || "")} · ${fmt.ago(p._age)}</span></div>
+  el.innerHTML = `<div class="panel-h"><h3>PostgreSQL · Patroni</h3><span class="badge ${ok ? "" : "crit"}">${ok ? "OK" : "проблема"}</span><button class="link" onclick="openCluster('patroni')">графики etcd →</button><span class="meta">${esc(p.scope || "")} · ${fmt.ago(p._age)}</span></div>
     ${p.error ? `<div class="alert crit" style="margin-bottom:12px">${esc(p.error)}</div>` : ""}
     <div class="tbl-wrap"><table><tr><th>Узел</th><th>Роль</th><th>Состояние</th><th class="r">TL</th><th class="r">Лаг</th></tr>${members}</table></div>
     <div class="stats" style="margin:16px 0 0;grid-template-columns:repeat(${Math.max(1, Math.min(3, Object.keys(p.etcd || {}).length))},1fr)">${etcd}</div>`;
@@ -383,12 +415,16 @@ function renderBackups(b, pv) {
 
 function render(d) {
   DATA = d;
-  const crit = d.alerts.filter(a => a.level == "crit").length, warn = d.alerts.length - crit;
-  $("#summary").innerHTML = d.alerts.length
+  const live = d.alerts.filter(a => !a.muted);
+  const crit = live.filter(a => a.level == "crit").length, warn = live.length - crit;
+  $("#summary").innerHTML = live.length
     ? `<span class="dot ${crit ? "crit" : "warn"}"></span>${crit ? crit + " критич." : ""}${crit && warn ? " · " : ""}${warn ? warn + " предупр." : ""}`
     : `<span class="dot pulse"></span>Всё в порядке · ${d.hosts.length} хост.`;
   $("#updated").textContent = "обновлено " + fmt.time(d.now) + ":" + String(new Date(d.now * 1000).getSeconds()).padStart(2, "0");
-  $("#alerts").innerHTML = d.alerts.map(a => `<div class="alert ${a.level}"><span class="dot ${a.level}"></span>${esc(a.msg)}<span class="since">${fmt.ago(d.now - a.since)}</span></div>`).join("");
+  $("#alerts").innerHTML = d.alerts.map(a => `<div class="alert ${a.level} ${a.muted ? "muted" : ""}"><span class="dot ${a.level}"></span>${a.muted ? "🔕 " : ""}${esc(a.msg)}<span class="since">${fmt.ago(d.now - a.since)}</span></div>`).join("");
+  $("#silences").innerHTML = d.silences.map(x => `<div class="silence">🔕 <span><b>${esc(x.label)}</b> — обслуживание ещё ${fmt.dur(x.until - d.now)}${x.reason ? ` · <span class="muted">${esc(x.reason)}</span>` : ""}</span><button data-sid="${esc(x.id)}">Снять</button></div>`).join("");
+  document.querySelectorAll("#silences button").forEach(b => b.onclick = () => api("api/silence/delete", {id: b.dataset.sid}));
+  renderChecks(d.cluster);
   renderHosts(d);
   renderCeph(d.cluster.ceph);
   renderPatroni(d.cluster.patroni);
@@ -410,6 +446,7 @@ function closeHost() {
   $("#overlay").classList.remove("open"); $("#drawer").classList.remove("open");
 }
 async function drawHost() {
+  if (OPEN && OPEN[0] == "@") return drawCluster(OPEN.slice(1));
   const name = OPEN, h = DATA.hosts.find(x => x.name == name);
   if (!h) return;
   const i = h.info || {}, m = h.metrics || {};
@@ -454,8 +491,95 @@ async function drawHost() {
   draw("load", [S("load1", "1 мин", C[4], true)], {fmt: v => v.toFixed(1)});
   draw("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
 }
-$("#overlay").onclick = closeHost;
-addEventListener("keydown", e => e.key == "Escape" && closeHost());
+$("#overlay").onclick = () => { closeMaint(); closeHost(); };
+addEventListener("keydown", e => { if (e.key == "Escape") { closeMaint(); closeHost(); } });
+
+/* --------------------------------------------------------------- services */
+function renderChecks(cl) {
+  const all = Object.entries(cl).filter(([k]) => k.startsWith("checks:"))
+    .flatMap(([k, v]) => (v.items || []).map(c => ({...c, src: k.slice(7), age: v._age})));
+  const el = $("#checks");
+  if (!all.length) { el.innerHTML = `<div class="empty">Проверки не настроены: добавь модуль "checks" и список "checks" в agent.json</div>`; return; }
+  all.sort((a, b) => a.ok - b.ok || a.name.localeCompare(b.name));
+  const bad = all.filter(c => !c.ok).length;
+  el.innerHTML = `<div class="panel-h"><span class="badge ${bad ? "crit" : ""}">${bad ? bad + " не отвечает" : "все отвечают"}</span><span class="muted" style="font-size:12px">${all.length} проверок · с ${esc([...new Set(all.map(c => c.src))].join(", "))}</span><button class="link" onclick="openCluster('checks')">время ответа →</button><span class="meta">${fmt.ago(all[0].age)}</span></div>
+    <div class="checks">${all.map(c => `<div class="chk ${c.ok ? "" : "bad"}" title="${esc(c.target)}">
+      <span class="dot ${c.ok ? "" : "crit"}"></span><span class="n">${esc(c.name)}</span>
+      <span class="num muted" style="font-size:12px">${c.ok ? (c.ms != null ? Math.round(c.ms) + " мс" : "ok") : esc(c.err || "ошибка")}</span>
+      <span class="t">${esc(c.type.toUpperCase())} · ${esc(c.target)}${c.code ? " · " + c.code : ""}</span></div>`).join("")}</div>`;
+}
+
+/* --------------------------------------------------------------- cluster charts */
+function openCluster(kind) {
+  OPEN = "@" + kind;
+  $("#overlay").classList.add("open"); $("#drawer").classList.add("open");
+  drawHost();
+}
+const CLUSTER = {
+  ceph: {title: "Ceph", group: "_ceph", charts: [
+    {id: "osd", title: "Задержка записи OSD (commit)", pick: m => m.startsWith("osd."), fmt: v => v.toFixed(0) + " мс"},
+    {id: "io", title: "Пропускная способность", pick: m => m == "io_rd" || m == "io_wr", label: m => m == "io_rd" ? "чтение" : "запись", fmt: v => fmt.rate(v)},
+    {id: "ops", title: "Операции в секунду", pick: m => m == "ops_rd" || m == "ops_wr", label: m => m == "ops_rd" ? "чтение" : "запись", fmt: v => v.toFixed(0)},
+  ]},
+  patroni: {title: "Patroni и etcd", group: "_etcd", charts: [
+    {id: "fsync", title: "etcd: fsync WAL (среднее за интервал)", pick: m => m.startsWith("fsync:"), label: m => m.slice(6), fmt: v => v.toFixed(1) + " мс", warn: 100},
+    {id: "commit", title: "etcd: commit backend", pick: m => m.startsWith("commit:"), label: m => m.slice(7), fmt: v => v.toFixed(1) + " мс"},
+    {id: "rtt", title: "etcd: время ответа /health", pick: m => m.startsWith("rtt:"), label: m => m.slice(4), fmt: v => v.toFixed(1) + " мс"},
+    {id: "lag", title: "Лаг репликации PostgreSQL", pick: m => m.startsWith("lag:"), label: m => m.slice(4), fmt: v => fmt.bytes(v)},
+  ]},
+  checks: {title: "Время ответа сервисов", group: "_checks", charts: [
+    {id: "chk", title: "Время ответа", pick: () => true, fmt: v => v.toFixed(0) + " мс", wide: true},
+  ]},
+};
+async function drawCluster(kind) {
+  const cfg = CLUSTER[kind], key = OPEN;
+  $("#drawer-in").innerHTML = `
+    <div class="drawer-h"><h3>${esc(cfg.title)}</h3><span class="spacer"></span>
+      <div class="ranges">${RANGES.map(([r, l]) => `<button data-r="${r}" class="${r == RANGE ? "on" : ""}">${l}</button>`).join("")}</div>
+      <button id="close">✕</button></div>
+    <div class="charts">${cfg.charts.map(c => `<div class="card chart" ${c.wide ? 'style="grid-column:1/-1"' : ""}><div class="chart-h"><h4>${esc(c.title)}</h4><div class="legend" id="lg-${c.id}"></div></div><div id="ch-${c.id}"></div></div>`).join("")}</div>`;
+  $("#close").onclick = closeHost;
+  document.querySelectorAll(".ranges button").forEach(b => b.onclick = () => { RANGE = +b.dataset.r; drawHost(); });
+  const names = await fetch(`api/metrics?host=${cfg.group}`).then(r => r.json());
+  const r = names.length ? await fetch(`api/history?host=${cfg.group}&range=${RANGE}&metrics=${encodeURIComponent(names.join(","))}`).then(r => r.json()) : {};
+  if (OPEN != key) return;
+  const C = [1, 2, 3, 4, 5, 6, 7, 8].map(i => css("--c" + i));
+  for (const c of cfg.charts) {
+    const ms = names.filter(c.pick);
+    const series = ms.map((m, i) => ({name: c.label ? c.label(m) : m, color: C[i % C.length], points: r[m]?.points || [], step: r[m]?.step, fill: ms.length == 1}))
+      .filter(x => x.points.length);
+    $("#lg-" + c.id).innerHTML = series.map(x => `<span><i style="background:${x.color}"></i>${esc(x.name)}</span>`).join("");
+    lineChart($("#ch-" + c.id), series, {fmt: c.fmt});
+  }
+}
+
+/* --------------------------------------------------------------- maintenance */
+async function api(url, body) {
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-Lumen": "1"}, body: JSON.stringify(body)});
+  if (!r.ok) alert("Ошибка: " + (await r.text()));
+  refresh();
+}
+const DURS = [[30, "30 мин"], [60, "1 ч"], [120, "2 ч"], [240, "4 ч"], [1440, "сутки"]];
+let DUR = 60;
+function openMaint() {
+  const opts = [["all", "Весь кластер"], ...DATA.hosts.map(h => ["host:" + h.name, "Хост " + h.name]),
+                ["ceph", "Ceph"], ["patroni", "Patroni и etcd"], ["checks", "Проверки сервисов"], ["backups", "Бэкапы"]];
+  $("#m-scope").innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+  const drawDur = () => {
+    $("#m-dur").innerHTML = DURS.map(([m, l]) => `<button data-m="${m}" class="${m == DUR ? "on" : ""}">${l}</button>`).join("");
+    document.querySelectorAll("#m-dur button").forEach(b => b.onclick = () => { DUR = +b.dataset.m; drawDur(); });
+  };
+  drawDur();
+  $("#m-reason").value = "";
+  $("#modal").classList.add("open"); $("#overlay").classList.add("open");
+}
+function closeMaint() { $("#modal").classList.remove("open"); if (!OPEN) $("#overlay").classList.remove("open"); }
+$("#maint").onclick = openMaint;
+$("#m-cancel").onclick = closeMaint;
+$("#m-ok").onclick = async () => {
+  await api("api/silence", {scope: $("#m-scope").value, minutes: DUR, reason: $("#m-reason").value.trim()});
+  closeMaint();
+};
 
 /* --------------------------------------------------------------- theme + loop */
 const THEMES = ["auto", "dark", "light"];

@@ -33,10 +33,15 @@ DEFAULTS = {
         "patroni_lag_bytes": 16 * 1024 * 1024,
         "backup_max_age_h": 36,
         "cluster_stale_sec": 300,
+        "check_for_sec": 60,
+        "etcd_fsync_ms": 100,
+        "osd_latency_ms": 250,
     },
 }
 
 ROLLUP_STEP = 300
+SERIES_MIN_GAP = 20  # кластерные ряды присылают несколько агентов — пишем не чаще раза в 20 с
+SILENCE_SCOPES = ("all", "ceph", "patroni", "checks", "backups")
 
 
 def load_config():
@@ -103,6 +108,9 @@ def event(level, msg):
 
 # ---------------------------------------------------------------- ingest
 
+SERIES_LAST = {}
+
+
 def ingest(p):
     host = str(p["host"])[:64]
     now = time.time()
@@ -111,6 +119,14 @@ def ingest(p):
     for d in p.get("disks") or []:
         if d.get("size"):
             rows.append((host, "disk:" + d["mount"], ts, round(100.0 * d["used"] / d["size"], 2)))
+    for group, values in (p.get("series") or {}).items():
+        if not group.startswith("_"):
+            continue
+        for k, v in values.items():
+            key = (group, k)
+            if isinstance(v, (int, float)) and ts - SERIES_LAST.get(key, 0) >= SERIES_MIN_GAP:
+                SERIES_LAST[key] = ts
+                rows.append((group[:64], k[:128], ts, float(v)))
     latest = {k: p.get(k) for k in ("metrics", "disks", "info", "interval")}
     latest["ts"] = ts
 
@@ -151,6 +167,46 @@ class Alerts:
     def __init__(self):
         self.active = S.meta_get("alerts", {})
         self.pending = {}  # key -> время первого нарушения
+        self.silences = S.meta_get("silences", [])
+        self.lock = threading.Lock()
+
+    # ---- режим обслуживания
+    @staticmethod
+    def scope_matches(scope, key):
+        if scope == "all":
+            return True
+        kind, _, rest = key.partition(":")
+        if scope.startswith("host:"):
+            return kind in ("down", "cpu", "mem", "temp", "disk", "node") and rest.split(":")[0] == scope[5:]
+        kinds = {"ceph": ("ceph",), "patroni": ("pg", "etcd", "etcdlat"), "checks": ("chk",), "backups": ("bk",)}
+        return kind in kinds.get(scope, ())
+
+    def silenced(self, key):
+        now = time.time()
+        return any(s["until"] > now and self.scope_matches(s["scope"], key) for s in self.silences)
+
+    def add_silence(self, scope, minutes, reason, who):
+        now = time.time()
+        sil = {"id": f"{int(now * 1000):x}", "scope": scope, "since": now, "until": now + minutes * 60,
+               "reason": reason[:200], "by": who}
+        with self.lock:
+            self.silences.append(sil)
+            S.meta_set("silences", self.silences)
+        text = f"Обслуживание: {scope_label(scope)} на {fmt_minutes(minutes)}" + (f" — {reason}" if reason else "")
+        event("info", text)
+        self.notify("🔕 " + text)
+        return sil
+
+    def remove_silence(self, sid, why="снято вручную"):
+        with self.lock:
+            hit = [s for s in self.silences if s["id"] == sid]
+            self.silences = [s for s in self.silences if s["id"] != sid]
+            S.meta_set("silences", self.silences)
+        for s in hit:
+            text = f"Обслуживание закончено: {scope_label(s['scope'])} ({why})"
+            event("info", text)
+            self.notify("🔔 " + text)
+        return bool(hit)
 
     def notify(self, text):
         cmd = CFG.get("notify_cmd")
@@ -227,6 +283,36 @@ class Alerts:
                     if not st.get("ok"):
                         found[f"etcd:{ep}"] = ("crit", f"etcd {ep}: нездоров ({st.get('err', '')})", 30)
 
+        for kind, (ts, results) in cl.items():
+            if not kind.startswith("checks:") or now - ts > r["cluster_stale_sec"]:
+                continue
+            src = kind[7:]
+            for c in results:
+                if not c.get("ok"):
+                    found[f"chk:{c['name']}"] = ("crit", f"Проверка «{c['name']}» не прошла: {c.get('err') or 'ошибка'}"
+                                                         f" ({c['target']}, с {src})", r["check_for_sec"])
+
+        if "ceph" in cl:
+            ts, c = cl["ceph"]
+            lat = c.get("osd_lat") or {}
+            if lat and now - ts <= r["cluster_stale_sec"]:
+                worst = max(lat, key=lat.get)
+                if lat[worst] > r["osd_latency_ms"]:
+                    found["ceph:lat"] = ("warn", f"Ceph: задержка записи {worst} {lat[worst]} мс", 120)
+
+        if "patroni" in cl:
+            ts, pt = cl["patroni"]
+            lc_prev = S.meta_get("etcd_lc", {})
+            for ep, st in (pt.get("etcd") or {}).items():
+                if (st.get("fsync_ms") or 0) > r["etcd_fsync_ms"]:
+                    found[f"etcdlat:{ep}"] = ("warn", f"etcd {ep}: fsync {st['fsync_ms']:.0f} мс", 60)
+                lc = st.get("leader_changes")
+                if lc is not None:
+                    if ep in lc_prev and lc > lc_prev[ep]:
+                        event("warn", f"etcd {ep}: смена лидера etcd (всего {lc})")
+                    lc_prev[ep] = lc
+            S.meta_set("etcd_lc", lc_prev)
+
         if "pve" in cl:
             ts, pv = cl["pve"]
             for n in pv.get("nodes", []):
@@ -265,24 +351,47 @@ class Alerts:
             if key not in found:
                 del self.pending[key]
 
+        # истёкшие окна обслуживания
+        for sil in [x for x in self.silences if x["until"] <= now]:
+            self.remove_silence(sil["id"], "время вышло")
+
+        icon = lambda lvl: "🔴 " if lvl == "crit" else "🟡 "
         for key, (lvl, msg) in fired.items():
+            muted = self.silenced(key)
             old = self.active.get(key)
             if not old:
-                self.active[key] = {"level": lvl, "msg": msg, "since": now}
-                event(lvl, msg)
-                self.notify(("🔴 " if lvl == "crit" else "🟡 ") + msg)
+                self.active[key] = {"level": lvl, "msg": msg, "since": now, "notified": not muted}
+                event(lvl, msg + (" (обслуживание)" if muted else ""))
+                if not muted:
+                    self.notify(icon(lvl) + msg)
             else:
                 if old["level"] != lvl:
                     event(lvl, msg)
-                    self.notify(("🔴 " if lvl == "crit" else "🟡 ") + msg)
+                    if not muted:
+                        self.notify(icon(lvl) + msg)
+                        old["notified"] = True
+                elif not muted and not old.get("notified", True):
+                    # обслуживание закончилось, а проблема осталась
+                    self.notify(icon(lvl) + msg + " (после обслуживания)")
+                    old["notified"] = True
                 old.update(level=lvl, msg=msg)
         for key in list(self.active):
             if key not in fired:
                 a = self.active.pop(key)
                 dur = int((now - a["since"]) / 60)
                 event("ok", f"Решено: {a['msg']} ({dur} мин)")
-                self.notify(f"✅ Решено: {a['msg']} (длилось {dur} мин)")
+                if a.get("notified", True) and not self.silenced(key):
+                    self.notify(f"✅ Решено: {a['msg']} (длилось {dur} мин)")
         S.meta_set("alerts", self.active)
+
+
+def scope_label(scope):
+    return {"all": "весь кластер", "ceph": "Ceph", "patroni": "Patroni/etcd", "checks": "проверки сервисов",
+            "backups": "бэкапы"}.get(scope, scope.replace("host:", "хост "))
+
+
+def fmt_minutes(m):
+    return f"{m // 60} ч" + (f" {m % 60} мин" if m % 60 else "") if m >= 60 else f"{m} мин"
 
 
 ALERTS = Alerts()
@@ -324,12 +433,17 @@ def overview():
         lt["age"] = now - last_ts
         lt["spark"] = {m: series(name, m, int(now - 3600), int(now), 60)["points"] for m in ("cpu", "mem")}
         hosts.append(lt)
-    cluster = {k: dict(json.loads(d), _age=now - ts, _src=src)
-               for k, ts, src, d in S.q("SELECT kind, ts, src, data FROM cluster")}
+    cluster = {}
+    for k, ts, src, d in S.q("SELECT kind, ts, src, data FROM cluster"):
+        data = json.loads(d)
+        cluster[k] = dict(data if isinstance(data, dict) else {"items": data}, _age=now - ts, _src=src)
     events = [{"ts": t, "level": l, "msg": m}
               for t, l, m in S.q("SELECT ts, level, msg FROM events ORDER BY ts DESC LIMIT 40")]
-    alerts = sorted(ALERTS.active.values(), key=lambda a: (a["level"] != "crit", a["since"]))
-    return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events}
+    alerts = sorted([dict(a, key=k, muted=ALERTS.silenced(k)) for k, a in ALERTS.active.items()],
+                    key=lambda a: (a["muted"], a["level"] != "crit", a["since"]))
+    silences = [dict(x, label=scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
+    return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events,
+            "silences": silences}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -360,9 +474,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def read_json(self):
+        n = int(self.headers.get("Content-Length", 0))
+        if n > 4 * 1024 * 1024:
+            raise ValueError("too big")
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def ui_post(self):
+        # свой заголовок не даёт отправить запрос обычной формой с чужой страницы
+        if self.headers.get("X-Lumen") != "1":
+            return self.send(403, {"error": "missing X-Lumen header"})
+        if not self.ui_auth_ok():
+            return
+        try:
+            body = self.read_json()
+            if self.path == "/api/silence":
+                scope = str(body.get("scope", ""))
+                hosts = {r[0] for r in S.q("SELECT name FROM hosts")}
+                if scope not in SILENCE_SCOPES and not (scope.startswith("host:") and scope[5:] in hosts):
+                    return self.send(400, {"error": "bad scope"})
+                minutes = int(body.get("minutes", 60))
+                if not 1 <= minutes <= 7 * 1440:
+                    return self.send(400, {"error": "bad minutes"})
+                who = self.headers.get("X-Forwarded-For") or self.client_address[0]
+                return self.send(200, ALERTS.add_silence(scope, minutes, str(body.get("reason", "")), who))
+            if self.path == "/api/silence/delete":
+                return self.send(200, {"ok": ALERTS.remove_silence(str(body.get("id")))})
+        except Exception as e:
+            return self.send(400, {"error": repr(e)})
+        self.send(404, {"error": "not found"})
+
     def do_POST(self):
         if self.path != "/api/push":
-            return self.send(404, {"error": "not found"})
+            return self.ui_post()
         if self.headers.get("Authorization") != f"Bearer {CFG['token']}":
             return self.send(403, {"error": "bad token"})
         try:
@@ -388,6 +532,10 @@ class Handler(BaseHTTPRequestHandler):
                 metrics = qs.get("metrics", "cpu").split(",")[:20]
                 out = {m: series(qs["host"], m, now - rng, now) for m in metrics}
                 return self.send(200, out)
+            if u.path == "/api/metrics":
+                rows = S.q("SELECT DISTINCT metric FROM raw WHERE host=? AND ts>?",
+                           (qs["host"], int(time.time()) - 3600))
+                return self.send(200, sorted(r[0] for r in rows))
             if u.path in ("/", "/index.html"):
                 with open(os.path.join(CFG["web"], "index.html"), "rb") as f:
                     return self.send(200, f.read(), "text/html; charset=utf-8")

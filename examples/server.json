@@ -8,12 +8,18 @@
   "rollup_keep_days": 30,
   "rules": {
     "host_down_sec": 90,
-    "cpu_pct": 90, "cpu_for_sec": 300,
-    "mem_pct": 92, "mem_for_sec": 300,
-    "disk_warn_pct": 85, "disk_crit_pct": 95,
+    "cpu_pct": 90,
+    "cpu_for_sec": 300,
+    "mem_pct": 92,
+    "mem_for_sec": 300,
+    "disk_warn_pct": 85,
+    "disk_crit_pct": 95,
     "temp_c": 85,
     "patroni_lag_bytes": 16777216,
     "backup_max_age_h": 36,
-    "cluster_stale_sec": 300
+    "cluster_stale_sec": 300,
+    "check_for_sec": 60,
+    "etcd_fsync_ms": 100,
+    "osd_latency_ms": 250
   }
 }

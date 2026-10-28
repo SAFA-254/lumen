@@ -6,10 +6,13 @@ import os
 import platform
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 CONFIG_PATH = os.environ.get("LUMEN_AGENT_CONFIG", "/etc/lumen/agent.json")
 CFG = {
@@ -23,6 +26,8 @@ CFG = {
     "backup_interval": 300,
     "patroni_url": "",
     "etcd_urls": [],
+    "checks": [],
+    "checks_interval": 30,
 }
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH) as f:
@@ -74,6 +79,13 @@ class Counters:
 
 
 C = Counters()
+
+# Кластерные временные ряды текущего цикла: {"_ceph": {"osd.3": 1.0, ...}, ...}
+SERIES = {}
+
+
+def series(group, values):
+    SERIES.setdefault(group, {}).update({k: v for k, v in values.items() if isinstance(v, (int, float))})
 
 
 def cpu():
@@ -237,11 +249,14 @@ def mod_pve():
 def mod_ceph():
     s = run_json(["ceph", "status", "-f", "json"], timeout=20)
     df = run_json(["ceph", "df", "-f", "json"], timeout=20)
+    perf = run_json(["ceph", "osd", "perf", "-f", "json"], timeout=20)
+    perf = perf.get("osdstats", perf).get("osd_perf_infos", [])
+    osd_lat = {f"osd.{o['id']}": o["perf_stats"]["commit_latency_ms"] for o in sorted(perf, key=lambda o: o["id"])}
     h = s.get("health", {})
     pg = s.get("pgmap", {})
     om = s.get("osdmap", {})
     om = om.get("osdmap", om)  # старые версии вкладывают osdmap дважды
-    return {
+    out = {
         "health": h.get("status"),
         "checks": [{"name": k, "severity": v.get("severity"), "msg": v.get("summary", {}).get("message", "")}
                    for k, v in h.get("checks", {}).items()],
@@ -255,28 +270,131 @@ def mod_ceph():
                    "pct": round(100.0 * p["stats"].get("percent_used", 0), 2),
                    "avail": p["stats"].get("max_avail")} for p in df.get("pools", [])],
     }
+    io = out["io"]
+    series("_ceph", dict(osd_lat, io_rd=io["rd"], io_wr=io["wr"], ops_rd=io["rd_ops"], ops_wr=io["wr_ops"]))
+    out["osd_lat"] = osd_lat
+    return out
+
+
+def prom_values(text, names):
+    """Значения нужных метрик из текстового формата Prometheus (без меток)."""
+    out = {}
+    for line in text.splitlines():
+        if line and line[0] != "#":
+            k, _, v = line.partition(" ")
+            if k in names:
+                out[k] = float(v)
+    return out
+
+
+ETCD_METRICS = ("etcd_disk_wal_fsync_duration_seconds_sum", "etcd_disk_wal_fsync_duration_seconds_count",
+                "etcd_disk_backend_commit_duration_seconds_sum", "etcd_disk_backend_commit_duration_seconds_count",
+                "etcd_server_has_leader", "etcd_server_leader_changes_seen_total")
+
+
+def avg_ms(key, total, count):
+    """Средняя длительность операции за интервал по разнице счётчиков _sum/_count."""
+    p = C.prev.get(key)
+    C.prev[key] = (total, count)
+    if not p or count <= p[1]:
+        return None
+    return round((total - p[0]) / (count - p[1]) * 1000, 2)
 
 
 def mod_patroni():
     out = {}
+    pts = {}
     try:
         c = http_json(CFG["patroni_url"].rstrip("/") + "/cluster")
         out["scope"] = c.get("scope")
         out["members"] = [{k: m.get(k) for k in ("name", "role", "state", "host", "timeline", "lag")}
                           for m in c.get("members", [])]
+        for m in out["members"]:
+            if isinstance(m.get("lag"), (int, float)):
+                pts["lag:" + m["name"]] = m["lag"]
     except Exception as e:
         out["error"] = str(e)[:200]
     etcd = {}
     for url in CFG["etcd_urls"]:
+        ep = url.split("//")[-1]
+        ip = ep.split(":")[0]
         t0 = time.time()
         try:
             h = http_json(url.rstrip("/") + "/health", timeout=5)
-            etcd[url.split("//")[-1]] = {"ok": str(h.get("health")) == "true",
-                                         "ms": round((time.time() - t0) * 1000, 1), "err": h.get("reason", "")}
+            st = {"ok": str(h.get("health")) == "true", "ms": round((time.time() - t0) * 1000, 1),
+                  "err": h.get("reason", "")}
+            pts["rtt:" + ip] = st["ms"]
         except Exception as e:
-            etcd[url.split("//")[-1]] = {"ok": False, "ms": None, "err": str(e)[:120]}
+            st = {"ok": False, "ms": None, "err": str(e)[:120]}
+        try:
+            with urllib.request.urlopen(url.rstrip("/") + "/metrics", timeout=5) as r:
+                pm = prom_values(r.read().decode(), ETCD_METRICS)
+            st["fsync_ms"] = avg_ms("fsync:" + ip, pm["etcd_disk_wal_fsync_duration_seconds_sum"],
+                                    pm["etcd_disk_wal_fsync_duration_seconds_count"])
+            st["commit_ms"] = avg_ms("commit:" + ip, pm["etcd_disk_backend_commit_duration_seconds_sum"],
+                                     pm["etcd_disk_backend_commit_duration_seconds_count"])
+            st["leader_changes"] = int(pm.get("etcd_server_leader_changes_seen_total", 0))
+            st["has_leader"] = pm.get("etcd_server_has_leader") == 1
+            for k in ("fsync_ms", "commit_ms"):
+                if st[k] is not None:
+                    pts[k.split("_")[0] + ":" + ip] = st[k]
+        except Exception:
+            pass  # /metrics может быть закрыт — тогда только health
+        etcd[ep] = st
     out["etcd"] = etcd
+    series("_etcd", pts)
     return out
+
+
+def check_one(c):
+    t = c.get("type", "http")
+    res = {"name": c["name"], "type": t, "target": c.get("url") or f"{c.get('host')}:{c.get('port', '')}".rstrip(":"),
+           "ok": False, "ms": None, "err": ""}
+    timeout = c.get("timeout", 5)
+    t0 = time.time()
+    try:
+        if t == "http":
+            ctx = ssl._create_unverified_context() if c.get("insecure") else None
+            req = urllib.request.Request(c["url"], headers={"User-Agent": "lumen-check"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                    code = r.status
+                    body = r.read(65536).decode(errors="replace")
+            except urllib.error.HTTPError as e:
+                code, body = e.code, ""
+            res["code"] = code
+            ok_codes = c.get("expect_status")
+            res["ok"] = code in ok_codes if ok_codes else code < 400
+            if res["ok"] and c.get("expect_text") and c["expect_text"] not in body:
+                res["ok"], res["err"] = False, "нет ожидаемого текста"
+            elif not res["ok"]:
+                res["err"] = f"HTTP {code}"
+        elif t == "tcp":
+            socket.create_connection((c["host"], c["port"]), timeout=timeout).close()
+            res["ok"] = True
+        elif t == "ping":
+            p = subprocess.run(["ping", "-c", "1", "-W", str(timeout), c["host"]], capture_output=True, text=True,
+                               timeout=timeout + 2)
+            m = re.search(r"time=([\d.]+)", p.stdout)
+            res["ok"] = p.returncode == 0
+            if m:
+                res["ms"] = float(m.group(1))
+            if not res["ok"]:
+                res["err"] = "нет ответа"
+        else:
+            res["err"] = "неизвестный тип"
+    except Exception as e:
+        res["err"] = (getattr(e, "reason", None) and str(e.reason) or str(e))[:120]
+    if res["ok"] and res["ms"] is None:
+        res["ms"] = round((time.time() - t0) * 1000, 1)
+    return res
+
+
+def mod_checks():
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(check_one, CFG["checks"]))
+    series("_checks", {r["name"]: r["ms"] for r in results if r["ok"]})
+    return results
 
 
 def mod_backups():
@@ -308,6 +426,7 @@ MODULES = {
     "ceph": (mod_ceph, "cluster_interval"),
     "patroni": (mod_patroni, "interval"),
     "backups": (mod_backups, "backup_interval"),
+    "checks": (mod_checks, "checks_interval"),
 }
 
 
@@ -336,9 +455,12 @@ def main():
                 continue
             last_run[name] = t0
             try:
-                payload["cluster"][name] = fn()
+                # проверки сервисов можно запускать с нескольких хостов, у каждого свой ключ
+                payload["cluster"]["checks:" + CFG["host"] if name == "checks" else name] = fn()
             except Exception as e:
                 print(f"module {name}: {e!r}", file=sys.stderr, flush=True)
+        payload["series"] = dict(SERIES)
+        SERIES.clear()
         try:
             push(payload)
             errors = 0
@@ -347,7 +469,7 @@ def main():
             if errors in (1, 10) or errors % 100 == 0:
                 print(f"push failed ({errors}): {e!r}", file=sys.stderr, flush=True)
             for name in payload["cluster"]:  # повторить кластерные модули в следующем цикле
-                last_run.pop(name, None)
+                last_run.pop(name.split(":")[0], None)
         time.sleep(max(1.0, CFG["interval"] - (time.time() - t0)))
 
 
