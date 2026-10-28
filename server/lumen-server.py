@@ -330,10 +330,14 @@ class Alerts:
             ts, bk = cl["backups"]
             seen = set(S.meta_get("bk_failed_seen", []))
             for t in bk.get("tasks", []):
-                if t.get("status") not in (None, "OK") and t["upid"] not in seen:
-                    seen.add(t["upid"])
-                    event("crit", f"Бэкап на {t['node']} завершился: {t['status']}")
-                    self.notify(f"❌ Бэкап на {t['node']} завершился с ошибкой: {t['status']}")
+                # список задач кластера хранит и старые записи — сообщаем только о свежих
+                if t.get("status") in (None, "OK") or t["upid"] in seen \
+                        or now - (t.get("endtime") or t["starttime"]) > 86400:
+                    continue
+                seen.add(t["upid"])
+                when = time.strftime("%d.%m %H:%M", time.localtime(t["starttime"]))
+                event("crit", f"Бэкап на {t['node']} ({when}) завершился: {t['status']}")
+                self.notify(f"❌ Бэкап на {t['node']} ({when}) завершился с ошибкой: {t['status']}")
             S.meta_set("bk_failed_seen", sorted(seen)[-200:])
             max_age = r["backup_max_age_h"] * 3600
             for g in bk.get("guests", []):
