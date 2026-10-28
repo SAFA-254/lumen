@@ -496,13 +496,12 @@ def mod_backups():
     return {"tasks": tasks[:15], "guests": guests, "storage": CFG["backup_storage"]}
 
 
-SSH_STATE = {"cursor": None, "pending": []}
+SSH_STATE = {"pending": []}
 SSH_ACCEPTED = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port")
+JOURNAL = {"cursor": None}
 
 
 def journal(args):
-    """Читает журнал от сохранённого курсора: journald сразу переходит к нужному месту,
-    поэтому это быстро даже на большом журнале. Возвращает строки и новый курсор."""
     out = subprocess.run(["journalctl", "--no-pager", "-q", "--show-cursor"] + args,
                          capture_output=True, text=True, timeout=20).stdout.splitlines()
     cursor = None
@@ -511,23 +510,45 @@ def journal(args):
     return out, cursor
 
 
-def mod_ssh():
-    """Новые успешные входы по SSH из журнала (только после запуска агента)."""
-    if SSH_STATE["cursor"] is None:
-        _, SSH_STATE["cursor"] = journal(["-n", "0"])  # начинаем с текущего конца журнала
-        return None
-    lines, cursor = journal(["--after-cursor", SSH_STATE["cursor"], "-t", "sshd", "-t", "sshd-session",
-                             "-o", "short-unix"])
-    for line in lines:
-        m = SSH_ACCEPTED.search(line)
-        if m:
-            try:
-                ts = float(line.split()[0])
-            except (ValueError, IndexError):
-                ts = time.time()
-            SSH_STATE["pending"].append({"ts": ts, "method": m.group(1), "user": m.group(2), "ip": m.group(3)})
+def read_journal():
+    """Все новые записи журнала с прошлого вызова — одним проходом для модулей ssh и logs.
+    Без фильтров: тогда курсор сдвигается всегда. С фильтром (-t sshd, -p 3) при отсутствии
+    подходящих записей курсор не выдаётся, и каждый следующий вызов заново перечитывал журнал
+    с прежнего места — в VM с диском в Ceph это давало ~15 МБ/с чтения по сети."""
+    now = time.time()
+    if JOURNAL["cursor"] is None:
+        _, JOURNAL["cursor"] = journal(["-n", "0"])  # начинаем с текущего конца журнала
+        LOG_STATE["ts"] = now
+        return
+    lines, cursor = journal(["--after-cursor", JOURNAL["cursor"], "-o", "json", "-n", "5000",
+                             "--output-fields=MESSAGE,PRIORITY,SYSLOG_IDENTIFIER,_COMM"])
     if cursor:
-        SSH_STATE["cursor"] = cursor
+        JOURNAL["cursor"] = cursor
+    want_ssh, want_logs = "ssh" in CFG["modules"], "logs" in CFG["modules"]
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        msg = e.get("MESSAGE")
+        if isinstance(msg, list):  # journald отдаёт не-UTF8 сообщения массивом байт
+            msg = bytes(msg).decode(errors="replace")
+        msg = str(msg or "").strip()
+        ident = e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or "?"
+        ts = int(e.get("__REALTIME_TIMESTAMP") or now * 1e6) / 1e6
+        if want_ssh and ident in ("sshd", "sshd-session"):
+            m = SSH_ACCEPTED.search(msg)
+            if m:
+                SSH_STATE["pending"].append({"ts": ts, "method": m.group(1), "user": m.group(2), "ip": m.group(3)})
+        if want_logs and str(e.get("PRIORITY", "6")).isdigit() and int(e["PRIORITY"]) <= 3:
+            LOG_STATE["count"] += 1
+            r = LOG_STATE["recent"].setdefault((ident, re.sub(r"\d+", "#", msg)[:160]), {"ident": ident, "n": 0})
+            r.update(n=r["n"] + 1, last=ts, msg=msg[:300])
+
+
+def mod_ssh():
+    """Новые успешные входы по SSH (только после запуска агента)."""
+    read_journal()
     return None  # входы уходят отдельным полем ssh_logins
 
 
@@ -581,40 +602,22 @@ def mod_smart():
     return {"disks": disks}
 
 
-LOG_STATE = {"cursor": None, "ts": 0, "recent": {}, "rate": None}
+LOG_STATE = {"ts": 0, "count": 0, "recent": {}, "rate": None}
 LOG_WINDOW = 3600
 
 
 def mod_logs():
     """Ошибки (priority err и выше) в журнале: скорость в минуту и самые частые за последний час."""
-    now = time.time()
-    if LOG_STATE["cursor"] is None:
-        _, LOG_STATE["cursor"] = journal(["-n", "0"])
-        LOG_STATE["ts"] = now
+    first = JOURNAL["cursor"] is None
+    read_journal()
+    if first:
         return None
-    lines, cursor = journal(["--after-cursor", LOG_STATE["cursor"], "-p", "3", "-o", "json", "-n", "2000"])
+    now = time.time()
     recent = LOG_STATE["recent"]
-    count = 0
-    for line in lines:
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        msg = e.get("MESSAGE")
-        if isinstance(msg, list):  # journald отдаёт не-UTF8 сообщения массивом байт
-            msg = bytes(msg).decode(errors="replace")
-        msg = str(msg or "").strip()
-        ident = e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or "?"
-        ts = int(e.get("__REALTIME_TIMESTAMP", now * 1e6)) / 1e6
-        count += 1
-        r = recent.setdefault((ident, re.sub(r"\d+", "#", msg)[:160]), {"ident": ident, "n": 0})
-        r.update(n=r["n"] + 1, last=ts, msg=msg[:300])
-    if cursor:
-        LOG_STATE["cursor"] = cursor
     for k in [k for k, r in recent.items() if r["last"] < now - LOG_WINDOW]:
         del recent[k]
-    LOG_STATE["rate"] = round(count * 60 / max(1.0, now - LOG_STATE["ts"]), 2)
-    LOG_STATE["ts"] = now
+    LOG_STATE["rate"] = round(LOG_STATE["count"] * 60 / max(1.0, now - LOG_STATE["ts"]), 2)
+    LOG_STATE["count"], LOG_STATE["ts"] = 0, now
     top = sorted(recent.values(), key=lambda r: (-r["n"], -r["last"]))[:8]
     return {"hour": sum(r["n"] for r in recent.values()), "top": top}
 
