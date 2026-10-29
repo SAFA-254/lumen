@@ -140,6 +140,10 @@ class Store:
         CREATE TABLE IF NOT EXISTS logins(host TEXT, ts REAL, user TEXT, ip TEXT, method TEXT, known INTEGER);
         CREATE INDEX IF NOT EXISTS logins_ts ON logins(ts);
         """)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(logins)")}
+        for col, typ in (("port", "INTEGER"), ("end", "REAL"), ("key", "TEXT"), ("fail", "INTEGER DEFAULT 0")):
+            if col not in cols:  # база от прежней версии: входы без выходов и неудачных попыток
+                self.db.execute(f"ALTER TABLE logins ADD COLUMN {col} {typ}")
 
     def q(self, sql, args=()):
         with self.lock:
@@ -218,6 +222,37 @@ def validate_check(c):
     return out
 
 
+METHODS = {"publickey": "ключ", "password": "пароль", "keyboard-interactive": "пароль",
+           "invalid user": "нет такого пользователя"}
+SSH_FAIL_SENT = {}  # (host, ip) -> когда сообщали о переборе
+
+
+def addr_names():
+    """IP -> имя: свои адреса хостов с агентом и подписи из списка известных адресов («IP имя»)."""
+    out = {}
+    for name, latest in S.q("SELECT name, latest FROM hosts"):
+        for ip in (json.loads(latest).get("info") or {}).get("ips") or []:
+            out.setdefault(ip, name)
+    for k in settings()["ssh_known"]:
+        parts = k.split(None, 1)
+        if len(parts) == 2 and "/" not in parts[0]:
+            out[parts[0]] = parts[1]
+    return out
+
+
+def ssh_bruteforce(host, now):
+    """5 и больше неудачных попыток с одного адреса за 10 минут — сообщаем, не чаще раза в час."""
+    for ip, n, users in S.q("SELECT ip, COUNT(*), GROUP_CONCAT(DISTINCT user) FROM logins "
+                            "WHERE host=? AND fail=1 AND ts>? GROUP BY ip HAVING COUNT(*) >= 5", (host, now - 600)):
+        if now - SSH_FAIL_SENT.get((host, ip), 0) < 3600:
+            continue
+        SSH_FAIL_SENT[(host, ip)] = now
+        msg = f"{host}: {n} неудачных попыток входа по SSH за 10 мин с {ip} (пользователи: {users[:120]})"
+        event("warn", msg)
+        if not ALERTS.silenced("ssh:" + host):
+            ALERTS.notify("🚫 " + msg)
+
+
 def ip_known(ip, known):
     try:
         addr = ipaddress.ip_address(ip)
@@ -225,7 +260,7 @@ def ip_known(ip, known):
         return False
     for k in known:
         try:
-            if addr in ipaddress.ip_network(k, strict=False):
+            if addr in ipaddress.ip_network(k.split()[0], strict=False):
                 return True
         except ValueError:
             continue
@@ -265,24 +300,38 @@ def ingest(p):
         clock["skew_ms"] = round(sorted(hist)[len(hist) // 2], 1)
     latest["clock"] = clock
     known = settings()["ssh_known"]
+    ssh = p.get("ssh_logins") or []
+    # строки входов и неудачных попыток: host, ts, user, ip, method, known, port, end, key, fail
     logins = [(host, float(x["ts"]), str(x["user"])[:64], str(x["ip"])[:64], str(x.get("method", ""))[:32],
-               int(ip_known(x["ip"], known))) for x in (p.get("ssh_logins") or [])]
+               int(ip_known(x["ip"], known)), x.get("port"), None, str(x["key"])[:80] if x.get("key") else None,
+               int(x.get("kind") == "fail"))
+              for x in ssh if x.get("kind", "in") in ("in", "fail")]
+    logouts = [(float(x["ts"]), host, str(x["ip"])[:64], x.get("port"), str(x["user"])[:64])
+               for x in ssh if x.get("kind") == "out"]
 
     def w(db):
         db.execute("INSERT OR REPLACE INTO hosts VALUES(?,?,?)", (host, now, json.dumps(latest)))
         db.executemany("INSERT INTO raw VALUES(?,?,?,?)", rows)
-        db.executemany("INSERT INTO logins VALUES(?,?,?,?,?,?)", logins)
+        db.executemany("INSERT INTO logins(host, ts, user, ip, method, known, port, end, key, fail) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?)", logins)
+        db.executemany("UPDATE logins SET end=? WHERE host=? AND ip=? AND port=? AND user=? AND end IS NULL "
+                       "AND fail=0", logouts)
         for kind, data in (p.get("cluster") or {}).items():
             if data is not None:
                 db.execute("INSERT OR REPLACE INTO cluster VALUES(?,?,?,?)", (kind, now, host, json.dumps(data)))
     S.tx(w)
 
-    for h, lts, user, ip, method, ok in logins:
-        if not ok:
-            msg = f"Вход по SSH на {h}: {user} с {ip} ({method}) — адрес не в списке известных"
+    names = addr_names()
+    for h, lts, user, ip, method, ok, port, _, key, fail in logins:
+        if not ok and not fail:
+            via = f"ключ {key}" if key else METHODS.get(method, method)
+            msg = f"Вход по SSH на {h}: {user} с {ip}{names.get(ip, '') and ' (' + names[ip] + ')'}, {via} — " \
+                  f"адрес не в списке известных"
             event("warn", msg)
             if not ALERTS.silenced("ssh:" + h):
                 ALERTS.notify("🔐 " + msg)
+    if any(x[9] for x in logins):
+        ssh_bruteforce(host, now)
 
     # первая настройка проверок: забираем список у агента, который их выполняет
     if checks_list() is None and p.get("checks_local"):
@@ -1055,7 +1104,7 @@ def morning_summary():
         out.append("Прогноз заполнения: " + "; ".join(
             f"{'Ceph' if f['host'] == '_ceph' else f['host'] + ' ' + f['target']} через ~{f['days']:.0f} дн"
             for f in sorted(fc, key=lambda f: f["days"])[:4]))
-    logins = S.q("SELECT host, user, ip, COUNT(*) FROM logins WHERE ts > ? AND known=0 GROUP BY host, user, ip", (day,))
+    logins = S.q("SELECT host, user, ip, COUNT(*) FROM logins WHERE ts > ? AND known=0 AND fail=0 GROUP BY host, user, ip", (day,))
     if logins:
         out.append("Входы по SSH с незнакомых адресов: " + "; ".join(f"{h}: {u} с {ip} ×{n}" for h, u, ip, n in logins))
     return "\n".join(out)
@@ -1133,8 +1182,8 @@ def weekly_report():
     if ut:
         out.append("Сервисы: " + ("все доступны ≥ 99.9%" if not bad else
                                   "ниже 99.9%: " + ", ".join(f"{n} {p:.2f}%" for n, p in sorted(bad, key=lambda x: x[1]))))
-    (unk,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ? AND known=0", (week,))
-    (tot,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ?", (week,))
+    (unk,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ? AND known=0 AND fail=0", (week,))
+    (tot,), = S.q("SELECT COUNT(*) FROM logins WHERE ts > ? AND fail=0", (week,))
     out.append(f"Входы по SSH: {tot}" + (f", с незнакомых адресов {unk}" if unk else ", все с известных адресов"))
     fc = [f for f in forecasts() if f["days"] is not None]
     if fc:
@@ -1352,6 +1401,26 @@ def series(host, metric, start, end, points=240):
     return {"step": step, "points": [[b, round(v, 3)] for b, v in rows]}
 
 
+def ssh_sessions(limit, since=0, fails=False):
+    """Сессии SSH: кто, откуда (адрес и имя), куда (хост и его адрес), чем вошёл, когда вышел."""
+    names, dest = addr_names(), {}
+    for ip, n in names.items():
+        dest.setdefault(n, ip)
+    rows = S.q("SELECT host, ts, user, ip, method, known, port, end, key, fail FROM logins WHERE ts > ? "
+               + ("" if fails else "AND fail=0 ") + "ORDER BY ts DESC LIMIT ?", (since, limit))
+    return [{"host": h, "host_ip": dest.get(h), "ts": t, "user": u, "ip": ip, "src": names.get(ip),
+             "method": METHODS.get(m, m), "key": key, "known": bool(k), "end": end, "fail": bool(f),
+             "tracked": port is not None}
+            for h, t, u, ip, m, k, port, end, key, f in rows]
+
+
+def ssh_fails(since):
+    return [{"host": h, "ip": ip, "n": n, "users": (users or "").split(","), "last": last}
+            for h, ip, n, users, last in S.q(
+                "SELECT host, ip, COUNT(*), GROUP_CONCAT(DISTINCT user), MAX(ts) FROM logins "
+                "WHERE fail=1 AND ts > ? GROUP BY host, ip ORDER BY MAX(ts) DESC", (since,))]
+
+
 def overview():
     now = time.time()
     hosts = []
@@ -1371,10 +1440,9 @@ def overview():
                      for k, a in ALERTS.active.items()],
                     key=lambda a: (a["muted"], a["level"] != "crit", a["since"]))
     silences = [dict(x, label=scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
-    logins = [{"host": h, "ts": t, "user": u, "ip": ip, "method": m, "known": bool(k)}
-              for h, t, u, ip, m, k in S.q("SELECT * FROM logins ORDER BY ts DESC LIMIT 15")]
+    logins = ssh_sessions(15)
     return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events,
-            "silences": silences, "logins": logins, "forecast": forecasts()}
+            "silences": silences, "logins": logins, "ssh_fails": ssh_fails(now - 86400), "forecast": forecasts()}
 
 
 def annotations(scope, start, end):
@@ -1451,7 +1519,7 @@ def save_settings(body):
             x = str(x).strip()
             if x:
                 try:
-                    ipaddress.ip_network(x, strict=False)
+                    ipaddress.ip_network(x.split()[0], strict=False)  # после адреса можно подписать имя
                 except ValueError:
                     raise ValueError(f"неверный адрес или подсеть: {x}")
                 known.append(x)
@@ -1633,6 +1701,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/metrics":
                 rows = S.q("SELECT DISTINCT metric FROM raw WHERE host=? AND ts>?", (qs["host"], now - 3600))
                 return self.send(200, sorted(r[0] for r in rows))
+            if u.path == "/api/ssh":
+                since = now - min(int(qs.get("days", 7)), CFG["rollup_keep_days"]) * 86400
+                return self.send(200, {"sessions": ssh_sessions(500, since, fails=True), "fails": ssh_fails(since)})
             if u.path == "/api/uptime":
                 return self.send(200, uptime(min(int(qs.get("days", 30)), CFG["rollup_keep_days"])))
             if u.path == "/api/alerts/history":

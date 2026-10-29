@@ -2,6 +2,7 @@
 """Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
 проверки сервисов, входы по SSH, статистику PostgreSQL, SMART дисков, ошибки журнала) и отправляет их на сервер.
 Только стандартная библиотека Python."""
+import base64
 import hashlib
 import json
 import os
@@ -264,8 +265,24 @@ def info():
         "uptime": float(read("/proc/uptime").split()[0]),
         "container": CONTAINER,
         "passwd": passwd_digest(),
+        "ips": own_ips(),
         "quorate": pve_quorate(),
     }
+
+
+IPS = {"ts": 0, "list": []}
+
+
+def own_ips():
+    """Свои IPv4 — по ним сервер подписывает адреса во входах SSH именами хостов."""
+    if time.time() - IPS["ts"] > 600:
+        try:
+            IPS["list"] = sorted({a["local"] for i in run_json(["ip", "-j", "-4", "addr"]) for a in i.get("addr_info", [])
+                                  if not a["local"].startswith("127.") and not i["ifname"].startswith(("docker", "br-"))})
+        except Exception:
+            pass
+        IPS["ts"] = time.time()
+    return IPS["list"]
 
 
 def passwd_digest():
@@ -689,7 +706,37 @@ def mod_backups():
 
 
 SSH_STATE = {"pending": []}
-SSH_ACCEPTED = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port")
+SSH_ACCEPTED = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port (\d+)(?: ssh2: \S+ (\S+))?")
+SSH_CLOSED = re.compile(r"Disconnected from user (\S+) (\S+) port (\d+)")
+# несуществующий пользователь даёт и «Invalid user», и «Failed … for invalid user» — считаем один раз
+SSH_FAILED = re.compile(r"(?:Failed (\S+) for (?!invalid user )(\S+)|Invalid user (\S*)) from (\S+) port (\d+)")
+SSH_KEYS = {"ts": 0, "names": {}}
+
+
+def ssh_key_names():
+    """Отпечаток SHA256 ключа -> комментарий из authorized_keys (обычно user@машина)."""
+    if time.time() - SSH_KEYS["ts"] < 600:
+        return SSH_KEYS["names"]
+    names = {}
+    for home in ["/root"] + [f"/home/{u}" for u in (os.listdir("/home") if os.path.isdir("/home") else [])]:
+        for fn in ("authorized_keys", "authorized_keys2"):
+            try:
+                lines = read(f"{home}/.ssh/{fn}").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                parts = line.split()
+                for i, x in enumerate(parts):  # перед ключом могут стоять опции
+                    if x.startswith(("ssh-", "ecdsa-", "sk-")) and i + 1 < len(parts):
+                        try:
+                            blob = base64.b64decode(parts[i + 1])
+                        except ValueError:
+                            break
+                        fp = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+                        names[fp] = " ".join(parts[i + 2:])[:60] or os.path.basename(home)
+                        break
+    SSH_KEYS.update(ts=time.time(), names=names)
+    return names
 JOURNAL = {"cursor": None}
 
 
@@ -731,7 +778,18 @@ def read_journal():
         if want_ssh and ident in ("sshd", "sshd-session"):
             m = SSH_ACCEPTED.search(msg)
             if m:
-                SSH_STATE["pending"].append({"ts": ts, "method": m.group(1), "user": m.group(2), "ip": m.group(3)})
+                ev = {"ts": ts, "kind": "in", "method": m.group(1), "user": m.group(2), "ip": m.group(3),
+                      "port": int(m.group(4))}
+                if m.group(5):
+                    ev["key"] = ssh_key_names().get(m.group(5)) or m.group(5)[:20]
+                SSH_STATE["pending"].append(ev)
+            elif m := SSH_CLOSED.search(msg):
+                SSH_STATE["pending"].append({"ts": ts, "kind": "out", "user": m.group(1), "ip": m.group(2),
+                                             "port": int(m.group(3))})
+            elif m := SSH_FAILED.search(msg):
+                SSH_STATE["pending"].append({"ts": ts, "kind": "fail", "method": m.group(1) or "invalid user",
+                                             "user": m.group(2) or m.group(3) or "?", "ip": m.group(4),
+                                             "port": int(m.group(5))})
         if want_logs and str(e.get("PRIORITY", "6")).isdigit() and int(e["PRIORITY"]) <= 3:
             LOG_STATE["count"] += 1
             r = LOG_STATE["recent"].setdefault((ident, re.sub(r"\d+", "#", msg)[:160]), {"ident": ident, "n": 0})
@@ -739,7 +797,7 @@ def read_journal():
 
 
 def mod_ssh():
-    """Новые успешные входы по SSH (только после запуска агента)."""
+    """Входы, выходы и неудачные попытки по SSH (только после запуска агента)."""
     read_journal()
     return None  # входы уходят отдельным полем ssh_logins
 

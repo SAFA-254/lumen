@@ -81,8 +81,20 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 
 /* layout */
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:16px;align-items:start}
-#ssh-p .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr));column-gap:0}
-#ssh-p .li .cnt{font-size:11px;color:var(--muted);background:var(--surface2);border-radius:5px;padding:0 5px}
+/* ssh: кто → куда | откуда | чем | когда */
+.sx{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr);gap:4px 16px;align-items:start;padding:9px 16px;border-top:1px solid var(--line);font-size:13px}
+.sx:first-child{border-top:0}
+.sx .s{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sx>div{min-width:0}
+.sx .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ssh-p .ph{flex-wrap:wrap;row-gap:6px}
+#ssh-p .ph .link{white-space:nowrap}
+.sx .cnt{font-size:11px;color:var(--muted);background:var(--surface2);border-radius:5px;padding:0 5px;margin-left:6px}
+.sx.fail .m b{color:var(--crit)}
+#ssh-p,#drawer-in{container-type:inline-size}
+@container (max-width:620px){.sx{grid-template-columns:minmax(0,1fr) minmax(0,1fr);row-gap:8px}.sxh{display:none !important}}
+.sxh{padding-top:8px;padding-bottom:4px;font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;border-top:0}
+.sfail{display:flex;gap:10px;align-items:baseline;padding:8px 16px;border-top:1px solid var(--line);font-size:12.5px;background:color-mix(in srgb,var(--crit) 6%,transparent)}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);min-width:0}
 .ph{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line)}
@@ -290,6 +302,9 @@ body.wall .status{font-size:15px;padding:7px 14px}
   .urow{grid-template-columns:100px 1fr 56px;gap:8px;padding:8px 12px}
   .ev{padding:8px 12px}
   .checks{grid-template-columns:1fr 1fr;gap:6px}
+  .sx{grid-template-columns:minmax(0,1fr) minmax(0,1fr);padding:9px 12px}
+  .sxh{display:none}
+  .sfail{padding:8px 12px;flex-wrap:wrap}
   .chk{padding:8px 9px;gap:7px}
   /* в таблице гостей на телефоне — только главное: узел, сеть и аптайм есть в панели гостя */
   #guests-p tr>:nth-child(3),#guests-p tr>:nth-child(7),#guests-p tr>:nth-child(8){display:none}
@@ -774,20 +789,69 @@ function renderLogs(cl, now) {
   el.querySelectorAll("[data-host]").forEach(b => b.onclick = () => openDrawer(b.dataset.host));
 }
 
-function renderSSH(logins, now) {
-  const el = $("#ssh-p");
+// подряд идущие одинаковые короткие сессии (скрипты, миграции между узлами) — одной строкой ×N
+function sshGroups(list) {
   const groups = [];
-  for (const l of logins) {
-    const g = groups[groups.length - 1];
-    if (g && g.user == l.user && g.host == l.host && g.ip == l.ip && g.first - l.ts < 600) { g.n++; g.first = l.ts; }
+  for (const l of list) {
+    const g = groups[groups.length - 1], short = x => x.fail || !x.tracked || (x.end && x.end - x.ts < 60);
+    if (g && g.fail == l.fail && g.user == l.user && g.host == l.host && g.ip == l.ip && g.key == l.key && short(g) && short(l) && g.first - l.ts < 600) { g.n++; g.first = l.ts; }
     else groups.push({...l, n: 1, first: l.ts});
   }
-  const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length;
-  el.innerHTML = panelHead("Входы по SSH", unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : "", "последние 15") +
-    (logins.length ? `<div class="list" style="padding:4px 0">${groups.map(l => `<div class="li" title="${esc(l.method)}">
-      <span class="dot ${l.known ? "" : "warn"}"></span><span><b style="font-weight:500">${esc(l.user)}</b> → ${esc(l.host)}</span>${l.n > 1 ? `<span class="cnt num">×${l.n}</span>` : ""}
-      <span class="end num"><span style="color:${l.known ? "var(--muted)" : "var(--warn)"}">${esc(l.ip)}</span> · ${fmt.time(l.ts, now - l.ts > 86400)}</span></div>`).join("")}</div>`
+  return groups;
+}
+const SSH_HEAD = `<div class="sx sxh"><div>Кто → куда</div><div>Откуда</div><div>Чем вошёл</div><div>Когда</div></div>`;
+function sshRow(l, now) {
+  const old = now - l.ts > 86400, t = x => fmt.time(x, old);
+  // интервал «вход – выход»; если всё в одну минуту — одно время
+  const span = (a, b) => b && t(a) != fmt.time(b, old) ? `${t(a)} – ${fmt.time(b, false)}` : t(a);
+  const dur = x => x < 60 ? Math.max(1, Math.round(x)) + " с" : fmt.dur(x);
+  const when = l.fail ? `<div class="m num">${span(l.first, l.n > 1 ? l.ts : 0)}</div><div class="s">не пустили</div>`
+    : `<div class="m num">${span(l.first, l.end || (l.n > 1 ? l.ts : 0))}</div>
+       <div class="s">${!l.tracked ? "выход не записан" : l.end ? (l.n > 1 ? `сессии по ${dur(l.end - l.ts)}` : `сессия ${dur(l.end - l.ts)}`) : `<span style="color:var(--ok)">● сейчас в системе ${fmt.dur(now - l.ts)}</span>`}</div>`;
+  return `<div class="sx ${l.fail ? "fail" : ""}">
+    <div><div class="m"><span class="dot ${l.fail ? "crit" : l.known ? "" : "warn"}" style="margin-right:7px"></span><b style="font-weight:600">${esc(l.user)}</b> → ${esc(l.host)}${l.n > 1 ? `<span class="cnt num">×${l.n}</span>` : ""}</div>
+      <div class="s num" style="padding-left:15px">${esc(l.host_ip || "")}</div></div>
+    <div><div class="m" style="${l.known ? "" : "color:var(--warn)"}">${esc(l.src || l.ip)}</div><div class="s num">${l.src ? esc(l.ip) : l.known ? "известный адрес" : "<span style='color:var(--warn)'>незнакомый адрес</span>"}</div></div>
+    <div><div class="m">${esc(l.method || "—")}</div><div class="s" title="${esc(l.key || "")}">${esc(l.key || "")}</div></div>
+    <div>${when}</div></div>`;
+}
+function failLine(f, now) {
+  return `<div class="sfail"><span class="dot crit"></span><span><b>${f.n}</b> неудачн${f.n == 1 ? "ая попытка" : f.n < 5 ? "ые попытки" : "ых попыток"} с <b class="num">${esc(f.ip)}</b> на ${esc(f.host)}
+    <span class="muted">· ${esc(f.users.slice(0, 5).join(", "))}${f.users.length > 5 ? "…" : ""}</span></span><span class="muted num" style="margin-left:auto;white-space:nowrap">${fmt.ago(now - f.last)}</span></div>`;
+}
+function renderSSH(logins, now) {
+  const el = $("#ssh-p"), fails = DATA.ssh_fails || [];
+  const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length, active = logins.filter(l => l.tracked && !l.end).length;
+  const nf = fails.reduce((a, f) => a + f.n, 0);
+  el.innerHTML = `<div class="ph"><h3>Входы по SSH</h3>${active ? `<span class="badge">${active} сейчас в системе</span>` : ""}${unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : ""}${nf ? `<span class="badge crit">${nf} неудачных за сутки</span>` : ""}
+    <button class="link" onclick="openDrawer('@ssh')">вся история →</button><span class="meta">последние 15</span></div>` +
+    fails.slice(0, 3).map(f => failLine(f, now)).join("") +
+    (logins.length ? `<div style="padding-bottom:4px">${SSH_HEAD}${sshGroups(logins).map(l => sshRow(l, now)).join("")}</div>`
       : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`);
+}
+let SDAYS = 7;
+async function drawSSH() {
+  $("#drawer-in").innerHTML = `<div class="drawer-h"><h3>Входы по SSH</h3><span class="spacer"></span>
+    <div class="ranges">${[[1, "сутки"], [7, "7 дней"], [30, "30 дней"]].map(([d, l]) => `<button data-d="${d}" class="${d == SDAYS ? "on" : ""}">${l}</button>`).join("")}</div><button id="close">✕</button></div>
+    <div id="sshh" class="empty">загрузка…</div>`;
+  $("#close").onclick = closeDrawer;
+  document.querySelectorAll(".ranges button").forEach(b => b.onclick = () => { SDAYS = +b.dataset.d; drawSSH(); });
+  const r = await getJSON(`api/ssh?days=${SDAYS}`);
+  if (OPEN != "@ssh") return;
+  const now = Date.now() / 1000, ok = r.sessions.filter(x => !x.fail);
+  const by = {};
+  for (const x of ok) { const k = `${x.user} с ${x.src || x.ip}`; by[k] = (by[k] || 0) + 1; }
+  $("#sshh").className = "";
+  $("#sshh").innerHTML = `
+    <div class="info-grid">
+      <div class="stat"><div class="l">Входов</div><div class="v num">${ok.length}</div></div>
+      <div class="stat"><div class="l">С незнакомых адресов</div><div class="v num" style="${ok.some(x => !x.known) ? "color:var(--warn)" : ""}">${ok.filter(x => !x.known).length}</div></div>
+      <div class="stat"><div class="l">Неудачных попыток</div><div class="v num" style="${r.fails.length ? "color:var(--crit)" : ""}">${r.fails.reduce((a, f) => a + f.n, 0)}</div></div>
+      <div class="stat"><div class="l">Чаще всего</div><div class="v" style="font-size:13px">${Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${esc(k)} <span class="muted">×${n}</span>`).join("<br>") || "—"}</div></div>
+    </div>
+    ${r.fails.length ? `<div class="panel" style="margin-bottom:12px">${panelHead("Неудачные попытки")}${r.fails.map(f => failLine(f, now)).join("")}</div>` : ""}
+    <div class="panel">${panelHead("Все входы и попытки", "", `за ${SDAYS == 1 ? "сутки" : SDAYS + " дн"}`)}
+      ${r.sessions.length ? SSH_HEAD + sshGroups(r.sessions).map(l => sshRow(l, now)).join("") : `<div class="empty">За этот период входов не было</div>`}</div>`;
 }
 
 function setBadge(live) {
@@ -866,6 +930,7 @@ function drawOpen() {
   if (!OPEN) return;
   if (OPEN == "@settings") return drawSettings();
   if (OPEN == "@history") return drawHistory();
+  if (OPEN == "@ssh") return drawSSH();
   if (OPEN.startsWith("@vm:")) return drawVM(+OPEN.slice(4));
   return OPEN[0] == "@" ? drawCluster(OPEN.slice(1)) : drawHost();
 }
@@ -1126,7 +1191,7 @@ function renderSettings(msg, isErr) {
     <label class="muted" style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="weekly" ${s.settings.weekly_report ? "checked" : ""}> По понедельникам в это же время присылать итоги недели (команда /week)</label>
 
     <div class="sect">Известные адреса для SSH</div>
-    <div class="muted" style="font-size:12.5px;margin-bottom:8px">Вход по SSH с адреса не из этого списка сразу приходит в Telegram. По одному адресу или подсети (например 192.168.3.0/24) на строку.</div>
+    <div class="muted" style="font-size:12.5px;margin-bottom:8px">Вход по SSH с адреса не из этого списка сразу приходит в Telegram. По одному адресу или подсети (например 192.168.3.0/24) на строку. После адреса можно написать имя — оно будет видно во входах: <span class="num">192.168.3.123 мой ПК</span>.</div>
     <textarea id="known">${esc(s.settings.ssh_known.join("\n"))}</textarea>
 
     <div class="sect">Команды в Telegram</div>
@@ -1211,7 +1276,7 @@ $("#theme").onclick = () => {
 function openFromHash() {
   const k = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
   if (!k || !DATA) return;
-  const cluster = ["ceph", "patroni", "checks", "settings", "history"].includes(k) || k.startsWith("vm:");
+  const cluster = ["ceph", "patroni", "checks", "settings", "history", "ssh"].includes(k) || k.startsWith("vm:");
   if (cluster || DATA.hosts.some(h => h.name == k)) openDrawer(cluster ? "@" + k : k);
 }
 let tick = 0;
@@ -1221,7 +1286,7 @@ async function refresh() {
     render(await getJSON("api/overview"));
     if (first) openFromHash();
     // графики в открытой панели обновляются реже, настройки — только вручную
-    if (OPEN && !ZOOM && !["@settings", "@history"].includes(OPEN) && ++tick % 3 == 0) drawOpen();
+    if (OPEN && !ZOOM && !["@settings", "@history", "@ssh"].includes(OPEN) && ++tick % 3 == 0) drawOpen();
   } catch (e) {
     if (e.message == "login") return;
     $("#summary").className = "status crit";
