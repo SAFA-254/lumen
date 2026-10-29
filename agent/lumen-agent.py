@@ -261,6 +261,17 @@ def self_usage(now):
             "agent_mem": int(read("/proc/self/statm").split()[1]) * PAGE}
 
 
+def mem_pressure():
+    """Доля времени (%, за минуту), когда процессы ждали память: подкачку страниц или освобождение кэша."""
+    path = "/sys/fs/cgroup/memory.pressure" if CONTAINER else "/proc/pressure/memory"
+    try:
+        for line in read(path).splitlines():
+            if line.startswith("some "):
+                return float(dict(x.split("=") for x in line.split()[1:])["avg60"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
 def system(now):
     c, io = cpu()
     mt, mu, st, su = memory()
@@ -276,6 +287,7 @@ def system(now):
         "net_util": round(util, 1) if util is not None else None, "link_mbit": link,
         "disk_r": dr, "disk_w": dw,
         "temp": temperature(),
+        "mem_psi": mem_pressure(),
     }
     m.update(self_usage(now))
     return {k: v for k, v in m.items() if v is not None}

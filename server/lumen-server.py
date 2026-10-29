@@ -51,6 +51,7 @@ RULES_META = {
     "cpu_for_sec": (300, "…дольше", "с", 0, 7200),
     "mem_pct": (92, "Память выше", "%", 10, 100),
     "mem_for_sec": (300, "…дольше", "с", 0, 7200),
+    "mem_psi_pct": (10, "Процессы ждут память (подкачка) дольше", "% времени", 1, 100),
     "disk_warn_pct": (85, "Диск: предупреждение", "%", 10, 100),
     "disk_crit_pct": (95, "Диск: критично", "%", 10, 100),
     "temp_c": (85, "Температура CPU выше", "°C", 40, 120),
@@ -61,6 +62,7 @@ RULES_META = {
     "cluster_stale_sec": (300, "Данные кластера устарели через", "с", 60, 3600),
     "check_for_sec": (60, "Проверка сервиса не проходит дольше", "с", 0, 3600),
     "etcd_fsync_ms": (100, "fsync etcd больше", "мс", 1, 10000),
+    "etcd_for_sec": (600, "…дольше", "с", 0, 7200),
     "osd_latency_ms": (250, "Задержка записи OSD больше", "мс", 1, 100000),
     "forecast_days": (14, "Предупреждать, если диск заполнится через", "дн", 1, 365),
     "net_util_pct": (80, "Загрузка сетевого канала выше", "%", 10, 100),
@@ -70,6 +72,7 @@ RULES_META = {
     "smart_wear_pct": (80, "Износ SSD больше", "%", 1, 100),
     "smart_temp_c": (60, "Температура диска выше", "°C", 30, 100),
     "cert_days": (14, "Сертификат HTTPS истекает раньше чем через", "дн", 1, 365),
+    "clear_sec": (300, "Считать алерт решённым, когда проблемы нет уже", "с", 0, 3600),
     "remind_h": (4, "Напоминать о незакрытом алерте каждые (0 — нет)", "ч", 0, 168),
     "iowait_pct": (30, "Ожидание диска (iowait) выше", "%", 1, 100),
     "iowait_for_sec": (600, "…дольше", "с", 0, 7200),
@@ -471,6 +474,7 @@ class Alerts:
     def __init__(self):
         self.active = S.meta_get("alerts", {})
         self.pending = {}  # key -> время первого нарушения
+        self.clearing = {}  # key -> с какого момента проблемы нет, а алерт ещё открыт
         self.silences = S.meta_get("silences", [])
         self.lock = threading.Lock()
 
@@ -554,7 +558,13 @@ class Alerts:
             if m.get("iowait", 0) > r["iowait_pct"]:
                 found[f"iowait:{name}"] = ("warn", f"{name}: ожидание диска (iowait) {m['iowait']:.0f}%",
                                            r["iowait_for_sec"])
-            if m.get("agent_cpu", 0) > r["agent_cpu_pct"] or m.get("agent_io", 0) > r["agent_io_kbs"] * 1024:
+            psi = m.get("mem_psi") or 0
+            if psi > r["mem_psi_pct"]:
+                found[f"mem:{name}:psi"] = ("warn", f"{name}: не хватает памяти — процессы ждут подкачку с диска "
+                                                    f"{psi:.0f}% времени", r["mem_for_sec"])
+            # при нехватке памяти агент тоже подкачивает свой код с диска — это следствие, о нём не пишем
+            if m.get("agent_cpu", 0) > r["agent_cpu_pct"] or \
+                    (m.get("agent_io", 0) > r["agent_io_kbs"] * 1024 and psi <= r["mem_psi_pct"]):
                 found[f"agent:{name}"] = ("warn", f"{name}: агент Lumen тратит CPU {m.get('agent_cpu', 0):.0f}%, "
                                                   f"диск {fmt_bytes(m.get('agent_io') or 0)}/с", 600)
             ck = lt.get("clock") or {}
@@ -623,17 +633,22 @@ class Alerts:
                 if leaders:
                     S.meta_set("pg_leader", leaders[0])
             lc_prev = S.meta_get("etcd_lc", {})
+            slow = []
             for ep, st in (pt.get("etcd") or {}).items():
                 if not st.get("ok"):
                     found[f"etcd:{ep}"] = ("crit", f"etcd {ep}: нездоров ({st.get('err', '')})", 30)
                 if (st.get("fsync_ms") or 0) > r["etcd_fsync_ms"]:
-                    found[f"etcdlat:{ep}"] = ("warn", f"etcd {ep}: fsync {st['fsync_ms']:.0f} мс", 60)
+                    slow.append(f"{ep.split(':')[0]} {st['fsync_ms']:.0f} мс")
                 lc = st.get("leader_changes")
                 if lc is not None:
                     if ep in lc_prev and lc > lc_prev[ep]:
                         event("warn", f"etcd {ep}: смена лидера etcd (всего {lc})")
                     lc_prev[ep] = lc
             S.meta_set("etcd_lc", lc_prev)
+            # все участники etcd пишут одно и то же, поэтому тормозят вместе — один алерт на всех
+            if slow:
+                found["etcdlat"] = ("warn", "etcd: медленная запись на диск (fsync) — " + ", ".join(slow),
+                                    r["etcd_for_sec"])
 
         for kind, (ts, data) in cl.items():
             if kind.startswith("checks:") and now - ts <= r["cluster_stale_sec"]:
@@ -719,6 +734,13 @@ class Alerts:
         for key in list(self.pending):
             if key not in found:
                 del self.pending[key]
+        # чтобы алерт не дребезжал, считаем его решённым, только когда проблемы нет какое-то время
+        for key, a in self.active.items():
+            if key in found:
+                self.clearing.pop(key, None)
+                a["hold"] = found[key][2]
+            elif now - self.clearing.setdefault(key, now) < min(r["clear_sec"], a.get("hold", 0)):
+                fired[key] = (a["level"], a["msg"])
 
         # истёкшие окна обслуживания
         for sil in [x for x in self.silences if x["until"] <= now]:
@@ -732,7 +754,7 @@ class Alerts:
                 cur = S.q("INSERT INTO alert_log(key, level, msg, start, end, muted) VALUES(?,?,?,?,NULL,?) "
                           "RETURNING id", (key, lvl, msg, now, int(muted)))
                 self.active[key] = {"level": lvl, "msg": msg, "since": now, "notified": not muted,
-                                    "log_id": cur[0][0]}
+                                    "log_id": cur[0][0], "hold": found[key][2]}
                 event(lvl, msg + (" (обслуживание)" if muted else ""))
                 if not muted:
                     self.notify(icon(lvl) + msg)
@@ -756,6 +778,7 @@ class Alerts:
         for key in list(self.active):
             if key not in fired:
                 a = self.active.pop(key)
+                self.clearing.pop(key, None)
                 if a.get("log_id"):
                     S.q("UPDATE alert_log SET end=?, msg=? WHERE id=?", (now, a["msg"], a["log_id"]))
                 dur = int((now - a["since"]) / 60)
