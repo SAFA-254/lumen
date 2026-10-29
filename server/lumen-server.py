@@ -786,8 +786,9 @@ class Alerts:
             for g in pv.get("guests", []):
                 vid = str(g["vmid"])
                 if g.get("status") == "running" and g.get("uptime") is not None:
-                    # гостей с агентом Lumen ловит сам агент по аптайму
-                    if vid in ups and g["uptime"] < ups[vid] and cur.get(vid) == prev.get(vid) \
+                    # гостей с агентом Lumen ловит сам агент по аптайму. Узлы видят аптайм с расхождением
+                    # до минуты, а данные Proxmox приходят то с одного узла, то с другого — мелкий откат не в счёт
+                    if vid in ups and g["uptime"] + 300 < ups[vid] and cur.get(vid) == prev.get(vid) \
                             and g["name"] not in agents:
                         event("warn", f"{vid} {g['name']}: перезапустилась (работает {fmt_dur(g['uptime'])})")
                         self.notify(f"🔄 {vid} {g['name']} перезапустилась")

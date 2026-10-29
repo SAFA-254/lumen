@@ -87,6 +87,9 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 .sx .s{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sx>div{min-width:0}
 .sx .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ssh-p{display:flex;flex-direction:column}
+#ssh-p .sbody{flex:1;min-height:0;overflow:auto;border-radius:0 0 var(--r) var(--r)}
+#ssh-p .sxh{position:sticky;top:0;z-index:1;background:var(--surface)}
 #ssh-p .ph{flex-wrap:wrap;row-gap:6px}
 #ssh-p .ph .link{white-space:nowrap}
 .sx .cnt{font-size:11px;color:var(--muted);background:var(--surface2);border-radius:5px;padding:0 5px;margin-left:6px}
@@ -820,14 +823,15 @@ function failLine(f, now) {
     <span class="muted">· ${esc(f.users.slice(0, 5).join(", "))}${f.users.length > 5 ? "…" : ""}</span></span><span class="muted num" style="margin-left:auto;white-space:nowrap">${fmt.ago(now - f.last)}</span></div>`;
 }
 function renderSSH(logins, now) {
-  const el = $("#ssh-p"), fails = DATA.ssh_fails || [];
+  const el = $("#ssh-p"), fails = DATA.ssh_fails || [], top = el.querySelector(".sbody")?.scrollTop || 0;
   const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length, active = logins.filter(l => l.tracked && !l.end).length;
   const nf = fails.reduce((a, f) => a + f.n, 0);
   el.innerHTML = `<div class="ph"><h3>Входы по SSH</h3>${active ? `<span class="badge">${active} сейчас в системе</span>` : ""}${unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : ""}${nf ? `<span class="badge crit">${nf} неудачных за сутки</span>` : ""}
     <button class="link" onclick="openDrawer('@ssh')">вся история →</button><span class="meta">последние 15</span></div>` +
-    fails.slice(0, 3).map(f => failLine(f, now)).join("") +
+    `<div class="sbody">${fails.slice(0, 3).map(f => failLine(f, now)).join("")}` +
     (logins.length ? `<div style="padding-bottom:4px">${SSH_HEAD}${sshGroups(logins).map(l => sshRow(l, now)).join("")}</div>`
-      : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`);
+      : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`) + `</div>`;
+  el.querySelector(".sbody").scrollTop = top;  // обновление раз в несколько секунд не сбрасывает прокрутку
 }
 let SDAYS = 7;
 async function drawSSH() {
@@ -895,7 +899,8 @@ function render(d) {
 
 /* Выравнивание колонок: ошибки журналов, бэкапы и входы по SSH переезжают в левую колонку, если правая заметно длиннее */
 function balance() {
-  const L = $("#col-l"), R = $("#col-r"), movable = [$("#logs-p"), $("#backups-p"), $("#ssh-p")];
+  const L = $("#col-l"), R = $("#col-r"), movable = [$("#logs-p"), $("#backups-p"), $("#ssh-p")], ssh = $("#ssh-p");
+  ssh.style.height = "";
   movable.forEach(p => R.append(p));
   if (getComputedStyle(L.parentNode).gridTemplateColumns.split(" ").length < 2) return;
   const gap = 16;
@@ -903,6 +908,11 @@ function balance() {
     if (p.offsetHeight + gap >= R.offsetHeight - L.offsetHeight) break;
     L.insertBefore(p, movable.find(m => m != p && m.parentNode == L && movable.indexOf(m) > movable.indexOf(p)) || null);
   }
+  // входы по SSH не тянут колонку вниз: заканчиваются вровень с соседней, остальное — прокруткой внутри
+  const col = ssh.parentNode, other = col == L ? R : L;
+  if (col.lastElementChild != ssh) return;
+  const room = other.getBoundingClientRect().bottom - ssh.getBoundingClientRect().top;
+  if (ssh.offsetHeight > room) ssh.style.height = Math.max(260, room) + "px";
 }
 
 /* --------------------------------------------------------------- drawers */
