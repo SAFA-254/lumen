@@ -356,7 +356,7 @@ def system(now):
         "net_rx": rx, "net_tx": tx,
         "net_util": round(util, 1) if util is not None else None, "link_mbit": link,
         "disk_r": dr, "disk_w": dw, "disk_lat": dlat,
-        "temp": temperature(),
+        "temp": None if CONTAINER else temperature(),  # в контейнере видны датчики узла, а не свои
         "mem_psi": mem_pressure(),
     }
     m.update(self_usage(now))

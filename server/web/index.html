@@ -612,7 +612,8 @@ function renderMap(pv) {
   el.innerHTML = panelHead("Схема кластера", "", "цвет полосы — нагрузка CPU гостя") + `<div class="map">${nodes.map(n => {
     const gs = pv.guests.filter(g => g.node == n.name && !g.template);
     const cpu = 100 * (n.cpu || 0), mem = n.maxmem ? 100 * n.mem / n.maxmem : 0;
-    return `<div class="node"><div class="node-h"><span class="dot ${n.status == "online" ? "" : "crit"}"></span><b>${esc(n.name)}</b><span class="faint" style="margin-left:auto;font-size:11.5px">${gs.filter(g => g.status == "running").length} из ${gs.length} запущено</span></div>
+    const t = DATA.hosts.find(h => h.name == n.name)?.metrics?.temp;
+    return `<div class="node"><div class="node-h"><span class="dot ${n.status == "online" ? "" : "crit"}"></span><b>${esc(n.name)}</b>${t != null ? `<span class="num" style="font-size:12px;margin-left:8px;color:${t >= 85 ? "var(--crit)" : t >= 70 ? "var(--warn)" : "var(--muted)"}" title="температура CPU">🌡 ${t.toFixed(0)} °C</span>` : ""}<span class="faint" style="margin-left:auto;font-size:11.5px">${gs.filter(g => g.status == "running").length} из ${gs.length} запущено</span></div>
       <div class="node-bars"><span>CPU</span>${bar(cpu, 80, 95)}<span class="num">${cpu.toFixed(0)}%</span><span>RAM</span>${bar(mem, 85, 95)}<span class="num">${mem.toFixed(0)}%</span></div>
       <div class="gtiles">${gs.map(g => {
         const run = g.status == "running", c = 100 * (g.cpu || 0);
@@ -970,7 +971,7 @@ async function drawHost() {
       <div class="stat"><div class="l">Память</div><div class="v num">${fmt.bytes(m.mem_used)} / ${fmt.bytes(m.mem_total)}</div></div>
       <div class="stat"><div class="l">Прогноз диска</div><div class="v num" style="font-size:13px">${fc.length ? fc.map(f => `${esc(f.target)}: ${fcText(f)}`).join("<br>") : "мало истории"}</div></div>
     </div>
-    <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ["disk", m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"],
+    <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ...(m.temp != null ? [["temp", "Температура CPU"]] : []), ["disk", "Заполнение дисков"],
         ...(m.net_util != null ? [["netu", `Загрузка канала ${m.link_mbit} Мбит/с`]] : []), ...(m.log_err != null ? [["logs", "Ошибки в журнале, в минуту"]] : []),
         ...(m.disk_lat != null ? [["lat", "Задержка диска, мс на операцию"]] : []),
         ...(m.agent_cpu != null ? [["agent", "Агент Lumen: CPU и диск"]] : [])]
@@ -989,7 +990,8 @@ async function drawHost() {
   drawSeries("net", [S("net_rx", "вход", C[2], true), S("net_tx", "выход", C[0])], {fmt: fmt.bits, ann});
   drawSeries("io", [S("disk_r", "чтение", C[0], true), S("disk_w", "запись", C[3])], {fmt: fmt.rate, ann});
   drawSeries("load", [S("load1", "1 мин", C[4], true)], {fmt: v => v.toFixed(1), ann});
-  drawSeries("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
+  if (m.temp != null) drawSeries("temp", [S("temp", "°C", C[3], true)], {fmt: v => v.toFixed(0) + " °C", minMax: 50, ann});
+  drawSeries("disk", disks.map((d, k) => S(d, d.slice(5), C[k % 3])), pct);
   if (m.net_util != null) drawSeries("netu", [S("net_util", "занято канала", C[2], true)], pct);
   if (m.log_err != null) drawSeries("logs", [S("log_err", "ошибок в минуту", C[3], true)], {fmt: v => v.toFixed(1), minMax: 1, ann});
   if (m.disk_lat != null) drawSeries("lat", [S("disk_lat", "самый медленный диск", C[3], true)], {fmt: v => v.toFixed(0) + " мс", minMax: 10, ann});
