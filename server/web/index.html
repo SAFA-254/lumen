@@ -865,25 +865,27 @@ async function drawHost() {
     </div>
     <div class="charts">${[["cpu", "CPU"], ["mem", "Память"], ["net", "Сеть"], ["io", "Диск I/O"], ["load", "Load average"], ["disk", m.temp != null ? "Температура и заполнение дисков" : "Заполнение дисков"],
         ...(m.net_util != null ? [["netu", `Загрузка канала ${m.link_mbit} Мбит/с`]] : []), ...(m.log_err != null ? [["logs", "Ошибки в журнале, в минуту"]] : []),
+        ...(m.disk_lat != null ? [["lat", "Задержка диска, мс на операцию"]] : []),
         ...(m.agent_cpu != null ? [["agent", "Агент Lumen: CPU и диск"]] : [])]
         .map(([id, t]) => chartBox(id, t)).join("")}</div>${hostExtras(name)}`;
   bindDrawer();
   bindProcs(name);
   CHARTS = [];
-  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", "net_util", "log_err", "agent_cpu", "agent_io", ...disks];
+  const metrics = ["cpu", "iowait", "mem", "swap", "net_rx", "net_tx", "disk_r", "disk_w", "load1", "temp", "net_util", "log_err", "agent_cpu", "agent_io", "disk_lat", "mem_psi", ...disks];
   const r = await getJSON(`api/history?host=${encodeURIComponent(name)}&${rangeQS()}&scope=${encodeURIComponent("host:" + name)}&metrics=${encodeURIComponent(metrics.join(","))}`);
   if (OPEN != name) return;
   const S = (key, label, color, fill) => ({name: label, color, fill, points: r[key]?.points || [], step: r[key]?.step});
   const C = PAL(), ann = r._annotations;
   const pct = {max: 100, fmt: v => v.toFixed(0) + "%", ann};
   drawSeries("cpu", [S("cpu", "CPU", C[0], true), S("iowait", "iowait", C[4])], pct);
-  drawSeries("mem", [S("mem", "RAM", C[1], true), S("swap", "swap", C[3])], pct);
+  drawSeries("mem", [S("mem", "RAM", C[1], true), S("swap", "swap", C[3]), ...(m.mem_psi != null ? [S("mem_psi", "ждут память", C[4])] : [])], pct);
   drawSeries("net", [S("net_rx", "вход", C[2], true), S("net_tx", "выход", C[0])], {fmt: fmt.bits, ann});
   drawSeries("io", [S("disk_r", "чтение", C[0], true), S("disk_w", "запись", C[3])], {fmt: fmt.rate, ann});
   drawSeries("load", [S("load1", "1 мин", C[4], true)], {fmt: v => v.toFixed(1), ann});
   drawSeries("disk", [...(m.temp != null ? [S("temp", "°C", C[3])] : []), ...disks.map((d, k) => S(d, d.slice(5), C[k % 3]))], pct);
   if (m.net_util != null) drawSeries("netu", [S("net_util", "занято канала", C[2], true)], pct);
   if (m.log_err != null) drawSeries("logs", [S("log_err", "ошибок в минуту", C[3], true)], {fmt: v => v.toFixed(1), minMax: 1, ann});
+  if (m.disk_lat != null) drawSeries("lat", [S("disk_lat", "самый медленный диск", C[3], true)], {fmt: v => v.toFixed(0) + " мс", minMax: 10, ann});
   if (m.agent_cpu != null) drawSeries("agent", [S("agent_cpu", "CPU, %", C[0], true)], {fmt: v => v.toFixed(1) + "%", minMax: 2, ann});
 }
 let PSORT = "cpu";
@@ -912,6 +914,7 @@ function hostExtras(name) {
     <div class="stat"><div class="l">Время</div><div class="v num" style="font-size:13px">${ck.sync === false ? `<span style="color:var(--warn)">не синхронизировано</span>` : ck.sync ? "синхронизировано" : "—"}<br><span class="muted">${ck.offset_ms != null ? `chrony ${ck.offset_ms} мс` : ""}${ck.skew_ms != null ? `${ck.offset_ms != null ? " · " : ""}<span title="разница с часами сервера Lumen, включая время в пути">к Lumen ${ck.skew_ms > 0 ? "+" : ""}${ck.skew_ms} мс</span>` : ""}</span></div></div>
     <div class="stat"><div class="l">Обновления</div><div class="v num" style="font-size:13px">${up ? (up.count ? `${up.count} пакетов${up.security ? `, безопасности ${up.security}` : ""}` : "всё обновлено") : "—"}<br><span class="muted" style="${up?.reboot ? "color:var(--warn)" : ""}">${up ? (up.reboot ? "нужна перезагрузка" : "перезагрузка не нужна") : ""}</span></div></div>
     <div class="stat"><div class="l">Процессов</div><div class="v num">${DATA.cluster["procs:" + name]?.count ?? "—"}</div></div>
+    ${h.ifaces?.length ? `<div class="stat"><div class="l">Сетевые линки</div><div class="v num" style="font-size:13px">${h.ifaces.map(x => `${esc(x.name)} ${x.up ? (x.speed ? x.speed + " Мбит/с" : "поднят") : `<span style="color:var(--crit)">нет линка</span>`}${x.err_min ? ` <span style="color:var(--warn)">${x.err_min} ош/мин</span>` : ""}`).join("<br>")}</div></div>` : ""}
   </div>`;
   if (DATA.cluster["procs:" + name]) out += `<div class="panel" id="procs-box" style="margin-top:12px">${procTable(name)}</div>`;
   if (sm?.disks?.length) out += `<div class="panel" style="margin-top:12px">${panelHead("Диски (SMART)", "", fmt.ago(sm._age))}<div class="tbl"><table>${smartHead(false)}${smartRows(sm.disks, false)}</table></div></div>`;

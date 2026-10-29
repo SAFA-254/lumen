@@ -2,6 +2,7 @@
 """Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
 проверки сервисов, входы по SSH, статистику PostgreSQL, SMART дисков, ошибки журнала) и отправляет их на сервер.
 Только стандартная библиотека Python."""
+import hashlib
 import json
 import os
 import platform
@@ -128,7 +129,7 @@ def memory():
 def disks():
     out, seen = [], set()
     for line in read("/proc/mounts").splitlines():
-        dev, mnt, fs = line.split()[:3]
+        dev, mnt, fs, opts = line.split()[:4]
         if fs not in REAL_FS or dev in seen or mnt.startswith(("/var/lib/docker", "/snap")):
             continue
         seen.add(dev)
@@ -140,7 +141,10 @@ def disks():
         if size == 0:
             continue
         used = size - st.f_bfree * st.f_frsize
-        out.append({"mount": mnt, "size": size, "used": used})
+        d = {"mount": mnt, "size": size, "used": used, "ro": opts.split(",")[0] == "ro"}
+        if st.f_files:
+            d["inodes"] = round(100.0 * (st.f_files - st.f_ffree) / st.f_files, 1)
+        out.append(d)
     return out
 
 
@@ -181,16 +185,46 @@ def net(now):
     return C.rate("rx", rx, now), C.rate("tx", tx, now), util, link
 
 
-def diskio(now):
+def ifaces(now):
+    """Физические интерфейсы: поднят ли линк, скорость, ошибки в минуту."""
     if CONTAINER:
-        return None, None
+        return None
+    out = []
+    for n in sorted(net_ifaces()):
+        try:
+            up = read(f"/sys/class/net/{n}/operstate").strip() == "up"
+            errs = sum(int(read(f"/sys/class/net/{n}/statistics/{k}")) for k in ("rx_errors", "tx_errors"))
+        except (OSError, ValueError):
+            continue
+        rate = C.rate("err:" + n, errs, now)
+        out.append({"name": n, "up": up, "speed": link_mbit(n) if up else None,
+                    "err_min": round(rate * 60, 1) if rate is not None else None})
+    return out
+
+
+DISK_OPS = {}  # устройство -> (операций, мс ожидания)
+
+
+def diskio(now):
+    """Скорость чтения/записи и средняя задержка операции у самого медленного диска."""
+    if CONTAINER:
+        return None, None, None
     rd = wr = 0
+    lat = None
     for line in read("/proc/diskstats").splitlines():
         f = line.split()
-        if WHOLE_DISK.match(f[2]):
-            rd += int(f[5]) * 512
-            wr += int(f[9]) * 512
-    return C.rate("dr", rd, now), C.rate("dw", wr, now)
+        rbd = re.match(r"rbd\d+$", f[2])
+        if WHOLE_DISK.match(f[2]) or rbd:
+            if not rbd:  # rbd на узле — это диски контейнеров, их трафик уже идёт через сеть
+                rd += int(f[5]) * 512
+                wr += int(f[9]) * 512
+            ops, ms = int(f[3]) + int(f[7]), int(f[6]) + int(f[10])
+            p = DISK_OPS.get(f[2])
+            DISK_OPS[f[2]] = (ops, ms)
+            if p and ops - p[0] >= 50:  # по паре операций задержку не судим
+                v = (ms - p[1]) / (ops - p[0])
+                lat = v if lat is None else max(lat, v)
+    return C.rate("dr", rd, now), C.rate("dw", wr, now), round(lat, 1) if lat is not None else None
 
 
 def temperature():
@@ -229,7 +263,26 @@ def info():
         "cpus": os.cpu_count(),
         "uptime": float(read("/proc/uptime").split()[0]),
         "container": CONTAINER,
+        "passwd": passwd_digest(),
+        "quorate": pve_quorate(),
     }
+
+
+def passwd_digest():
+    """Отпечаток списка пользователей: имя, uid, shell — без паролей."""
+    try:
+        rows = sorted(":".join(l.split(":")[i] for i in (0, 2, 6)) for l in read("/etc/passwd").splitlines() if l.count(":") >= 6)
+    except OSError:
+        return None
+    return {"hash": hashlib.sha1("\n".join(rows).encode()).hexdigest()[:16], "users": [r.split(":")[0] for r in rows]}
+
+
+def pve_quorate():
+    """Есть ли кворум у кластера Proxmox: файл обновляет сам pmxcfs, вызывать pvesh не нужно."""
+    try:
+        return bool(json.loads(read("/etc/pve/.members"))["cluster"]["quorate"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
@@ -276,7 +329,7 @@ def system(now):
     c, io = cpu()
     mt, mu, st, su = memory()
     rx, tx, util, link = net(now)
-    dr, dw = diskio(now)
+    dr, dw, dlat = diskio(now)
     l1, l5, l15 = os.getloadavg()
     m = {
         "cpu": c, "iowait": io,
@@ -285,7 +338,7 @@ def system(now):
         "load1": l1, "load5": l5,
         "net_rx": rx, "net_tx": tx,
         "net_util": round(util, 1) if util is not None else None, "link_mbit": link,
-        "disk_r": dr, "disk_w": dw,
+        "disk_r": dr, "disk_w": dw, "disk_lat": dlat,
         "temp": temperature(),
         "mem_psi": mem_pressure(),
     }
@@ -920,7 +973,7 @@ def main():
         if t0 - clock_ts >= CFG["clock_interval"]:
             clock, clock_ts = clock_state(), t0
         payload = {"host": CFG["host"], "ts": int(t0), "interval": CFG["interval"],
-                   "metrics": system(t0), "disks": disks(), "info": info(), "cluster": {}, "clock": clock}
+                   "metrics": system(t0), "disks": disks(), "info": info(), "ifaces": ifaces(t0), "cluster": {}, "clock": clock}
         modules = list(CFG["modules"])
         if active_checks() and "checks" not in modules:
             modules.append("checks")  # сервер назначил этот хост выполнять проверки

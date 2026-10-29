@@ -51,6 +51,10 @@ RULES_META = {
     "cpu_for_sec": (300, "…дольше", "с", 0, 7200),
     "mem_pct": (92, "Память выше", "%", 10, 100),
     "mem_for_sec": (300, "…дольше", "с", 0, 7200),
+    "swap_pct": (50, "Swap занят больше", "%", 1, 100),
+    "load_per_cpu": (1.5, "Load average на ядро выше (5 мин)", "", 0.1, 100),
+    "disk_lat_ms": (100, "Задержка диска выше (15 мин)", "мс", 1, 100000),
+    "net_err_per_min": (10, "Ошибок на сетевом интерфейсе больше", "в мин", 0.1, 100000),
     "mem_psi_pct": (10, "Процессы ждут память (подкачка) дольше", "% времени", 1, 100),
     "disk_warn_pct": (85, "Диск: предупреждение", "%", 10, 100),
     "disk_crit_pct": (95, "Диск: критично", "%", 10, 100),
@@ -250,7 +254,7 @@ def ingest(p):
             if isinstance(v, (int, float)) and ts - SERIES_LAST.get(key, 0) >= SERIES_MIN_GAP:
                 SERIES_LAST[key] = ts
                 rows.append((group[:64], k[:128], ts, float(v)))
-    latest = {k: p.get(k) for k in ("metrics", "disks", "info", "interval")}
+    latest = {k: p.get(k) for k in ("metrics", "disks", "info", "interval", "ifaces")}
     latest["ts"] = ts
     clock = dict(p.get("clock") or {})
     if isinstance(p.get("sent"), (int, float)):
@@ -486,9 +490,9 @@ class Alerts:
         kind, _, rest = key.partition(":")
         if scope.startswith("host:"):
             return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc", "net", "logs", "smart",
-                            "iowait", "anom", "agent", "clock") and \
+                            "iowait", "anom", "agent", "clock", "dlat", "if") and \
                 rest.split(":")[0] == scope[5:]
-        kinds = {"ceph": ("ceph",), "patroni": ("pg", "etcd", "etcdlat", "pgdb"), "checks": ("chk", "cert"),
+        kinds = {"ceph": ("ceph", "stor"), "patroni": ("pg", "etcd", "etcdlat", "pgdb"), "checks": ("chk", "cert"),
                  "backups": ("bk", "pbs"), "ssh": ("ssh",)}
         return kind in kinds.get(scope, ())
 
@@ -558,6 +562,21 @@ class Alerts:
             if m.get("iowait", 0) > r["iowait_pct"]:
                 found[f"iowait:{name}"] = ("warn", f"{name}: ожидание диска (iowait) {m['iowait']:.0f}%",
                                            r["iowait_for_sec"])
+            if m.get("swap", 0) > r["swap_pct"]:
+                found[f"mem:{name}:swap"] = ("warn", f"{name}: swap занят на {m['swap']:.0f}%", r["mem_for_sec"])
+            ncpu = (lt.get("info") or {}).get("cpus") or 1
+            if m.get("load5", 0) / ncpu > r["load_per_cpu"]:
+                found[f"cpu:{name}:load"] = ("warn", f"{name}: load average {m['load5']:.1f} на {ncpu} ядер", 300)
+            if (m.get("disk_lat") or 0) > r["disk_lat_ms"]:
+                found[f"dlat:{name}"] = ("warn", f"{name}: диск отвечает медленно — {m['disk_lat']:.0f} мс на операцию",
+                                         900)
+            self.host_changes(name, lt)
+            for i in lt.get("ifaces") or []:
+                if (i.get("err_min") or 0) > r["net_err_per_min"]:
+                    found[f"if:{name}:{i['name']}:err"] = ("warn", f"{name}: {i['err_min']:.0f} ошибок в минуту "
+                                                                   f"на интерфейсе {i['name']}", 300)
+            for key, v in self.iface_problems(name, lt.get("ifaces") or [], now).items():
+                found[key] = v
             psi = m.get("mem_psi") or 0
             if psi > r["mem_psi_pct"]:
                 found[f"mem:{name}:psi"] = ("warn", f"{name}: не хватает памяти — процессы ждут подкачку с диска "
@@ -577,6 +596,14 @@ class Alerts:
                 found[f"logs:{name}"] = ("warn", f"{name}: {m['log_err']:.0f} ошибок в журнале в минуту",
                                          r["log_for_sec"])
             for d in lt.get("disks") or []:
+                if d.get("ro") and d["mount"] != "/boot/efi":
+                    found[f"disk:{name}:{d['mount']}:ro"] = ("crit", f"{name}: файловая система {d['mount']} "
+                                                                     f"стала только для чтения", 0)
+                ip = d.get("inodes") or 0
+                if ip > r["disk_warn_pct"]:
+                    found[f"disk:{name}:{d['mount']}:inodes"] = ("crit" if ip > r["disk_crit_pct"] else "warn",
+                                                                 f"{name}: на {d['mount']} заканчиваются inode — "
+                                                                 f"занято {ip:.0f}%", 0)
                 pct = 100.0 * d["used"] / d["size"] if d.get("size") else 0
                 if pct > r["disk_warn_pct"]:
                     lvl = "crit" if pct > r["disk_crit_pct"] else "warn"
@@ -679,6 +706,10 @@ class Alerts:
 
         if "pve" in cl:
             ts, pv = cl["pve"]
+            q = [(json.loads(x).get("info") or {}).get("quorate")
+                 for (x,) in S.q("SELECT latest FROM hosts WHERE last_ts > ?", (now - r["host_down_sec"],))]
+            if False in q:
+                found["node:quorum"] = ("crit", "Кластер Proxmox без кворума", 30)
             for n in pv.get("nodes", []):
                 if n.get("status") != "online":
                     found[f"node:{n['name']}"] = ("crit", f"Узел {n['name']}: {n.get('status')}", 0)
@@ -688,7 +719,40 @@ class Alerts:
                 if vmid in prev and prev[vmid] != st:
                     name = next((g["name"] for g in pv["guests"] if str(g["vmid"]) == vmid), vmid)
                     event("info", f"{vmid} {name}: {prev[vmid]} → {st}")
+                    if not self.silenced(f"down:{name}"):
+                        if st == "stopped":
+                            self.notify(f"⏹ {vmid} {name} остановлена (была {prev[vmid]})")
+                        elif st == "running":
+                            self.notify(f"▶️ {vmid} {name} запущена")
             S.meta_set("guest_status", cur)
+            agents = {h for (h,) in S.q("SELECT name FROM hosts")}
+            ups = S.meta_get("guest_uptime", {})
+            for g in pv.get("guests", []):
+                vid = str(g["vmid"])
+                if g.get("status") == "running" and g.get("uptime") is not None:
+                    # гостей с агентом Lumen ловит сам агент по аптайму
+                    if vid in ups and g["uptime"] < ups[vid] and cur.get(vid) == prev.get(vid) \
+                            and g["name"] not in agents:
+                        event("warn", f"{vid} {g['name']}: перезапустилась (работает {fmt_dur(g['uptime'])})")
+                        self.notify(f"🔄 {vid} {g['name']} перезапустилась")
+                    ups[vid] = g["uptime"]
+            S.meta_set("guest_uptime", ups)
+            for g in pv.get("guests", []):
+                # у гостей без агента Lumen берём CPU и память из Proxmox
+                if g.get("status") != "running" or g.get("template") or g["name"] in agents:
+                    continue
+                if 100 * (g.get("cpu") or 0) > r["cpu_pct"]:
+                    found[f"cpu:{g['name']}"] = ("warn", f"{g['name']}: CPU {100 * g['cpu']:.0f}%", r["cpu_for_sec"])
+                if g.get("maxmem") and 100 * g["mem"] / g["maxmem"] > r["mem_pct"]:
+                    found[f"mem:{g['name']}"] = ("warn", f"{g['name']}: RAM {100 * g['mem'] / g['maxmem']:.0f}%",
+                                                 r["mem_for_sec"])
+            for st in pv.get("storage", []):
+                if st.get("maxdisk") and st.get("plugintype") not in ("rbd", "cephfs"):  # Ceph считаем отдельно
+                    pct = 100.0 * st["disk"] / st["maxdisk"]
+                    if pct > r["disk_warn_pct"]:
+                        where = st["storage"] + ("" if st.get("shared") else f" на {st['node']}")
+                        found[f"stor:{where}"] = ("crit" if pct > r["disk_crit_pct"] else "warn",
+                                                  f"Хранилище {where} заполнено на {pct:.0f}%", 0)
 
         if "pbs" in cl and now - cl["pbs"][0] <= 3 * 3600:
             for st in cl["pbs"][1].get("stores", []):
@@ -787,6 +851,57 @@ class Alerts:
                     self.notify(f"✅ Решено: {a['msg']} (длилось {dur} мин)")
         S.meta_set("alerts", self.active)
 
+
+    def host_changes(self, name, lt):
+        """Перезагрузка хоста, новое ядро, изменения в /etc/passwd — сообщаем один раз."""
+        info = lt.get("info") or {}
+        base = S.meta_get("host_base", {})
+        old = base.get(name, {})
+        up = info.get("uptime")
+        if up is not None and old.get("uptime") is not None and up < old["uptime"]:
+            event("warn", f"{name}: перезагрузился (работает {fmt_dur(up)})")
+            self.notify(f"🔄 {name} перезагрузился")
+        if info.get("kernel") and old.get("kernel") and info["kernel"] != old["kernel"]:
+            event("info", f"{name}: ядро {old['kernel']} → {info['kernel']}")
+        pw = info.get("passwd") or {}
+        if pw.get("hash") and old.get("passwd") and pw["hash"] != old["passwd"]:
+            was, now_users = set(old.get("users", [])), set(pw.get("users", []))
+            diff = [f"+{u}" for u in sorted(now_users - was)] + [f"−{u}" for u in sorted(was - now_users)]
+            text = f"{name}: изменился /etc/passwd" + (f" ({', '.join(diff)})" if diff else " (uid или shell)")
+            event("warn", text)
+            if not self.silenced(f"ssh:{name}"):
+                self.notify("👤 " + text)
+        base[name] = {"uptime": up, "kernel": info.get("kernel") or old.get("kernel"),
+                      "passwd": pw.get("hash") or old.get("passwd"), "users": pw.get("users") or old.get("users", [])}
+        S.meta_set("host_base", base)
+
+    def iface_problems(self, name, ifs, now):
+        """Линк упал или скорость стала ниже обычной. Обычная — максимум, что видели; через сутки
+        на новой скорости считаем её обычной (кабель или порт поменяли намеренно)."""
+        base = S.meta_get("iface_base", {})
+        hb = base.setdefault(name, {})
+        out = {}
+        for i in ifs:
+            b = hb.setdefault(i["name"], {"speed": None, "seen_up": False, "low_since": None})
+            if i["up"]:
+                b["seen_up"] = True
+            elif b["seen_up"]:
+                out[f"if:{name}:{i['name']}:down"] = ("crit", f"{name}: линк {i['name']} упал", 60)
+                continue
+            sp = i.get("speed")
+            if not sp:
+                continue
+            if b["speed"] is None or sp >= b["speed"]:
+                b["speed"], b["low_since"] = sp, None
+            else:
+                b["low_since"] = b["low_since"] or now
+                if now - b["low_since"] > 86400:
+                    b["speed"], b["low_since"] = sp, None
+                else:
+                    out[f"if:{name}:{i['name']}:speed"] = ("warn", f"{name}: скорость линка {i['name']} упала "
+                                                                   f"{b['speed']} → {sp} Мбит/с", 60)
+        S.meta_set("iface_base", base)
+        return out
 
     def smart(self, host, data, r, found):
         """Алерты по SMART одного узла и мгновенное сообщение, если вырос счётчик ошибок диска."""
