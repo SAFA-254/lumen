@@ -1448,7 +1448,7 @@ def overview():
                      for k, a in ALERTS.active.items()],
                     key=lambda a: (a["muted"], a["level"] != "crit", a["since"]))
     silences = [dict(x, label=scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
-    logins = ssh_sessions(15)
+    logins = ssh_sessions(150, now - 7 * 86400)  # панель прокручивается — показываем неделю
     return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events,
             "silences": silences, "logins": logins, "ssh_fails": ssh_fails(now - 86400), "forecast": forecasts()}
 

@@ -827,7 +827,7 @@ function renderSSH(logins, now) {
   const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length, active = logins.filter(l => l.tracked && !l.end).length;
   const nf = fails.reduce((a, f) => a + f.n, 0);
   el.innerHTML = `<div class="ph"><h3>Входы по SSH</h3>${active ? `<span class="badge">${active} сейчас в системе</span>` : ""}${unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : ""}${nf ? `<span class="badge crit">${nf} неудачных за сутки</span>` : ""}
-    <button class="link" onclick="openDrawer('@ssh')">вся история →</button><span class="meta">последние 15</span></div>` +
+    <button class="link" onclick="openDrawer('@ssh')">вся история →</button><span class="meta">за 7 дней${logins.length >= 150 ? ", последние 150" : ""}</span></div>` +
     `<div class="sbody">${fails.slice(0, 3).map(f => failLine(f, now)).join("")}` +
     (logins.length ? `<div style="padding-bottom:4px">${SSH_HEAD}${sshGroups(logins).map(l => sshRow(l, now)).join("")}</div>`
       : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`) + `</div>`;
