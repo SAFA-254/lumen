@@ -81,7 +81,7 @@ header{position:sticky;top:0;z-index:5;background:var(--hdr);backdrop-filter:sat
 
 /* layout */
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:16px;align-items:start}
-#ssh-p .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));column-gap:0}
+#ssh-p .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr));column-gap:0}
 #ssh-p .li .cnt{font-size:11px;color:var(--muted);background:var(--surface2);border-radius:5px;padding:0 5px}
 .col{display:flex;flex-direction:column;gap:16px;min-width:0}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);min-width:0}
@@ -255,13 +255,45 @@ body.wall .status{font-size:15px;padding:7px 14px}
   .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
 @media (max-width:760px){
-  .hdr,.wrap{padding-left:16px;padding-right:16px}
-  .updated{display:none}
-  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .hdr,.wrap{padding-left:12px;padding-right:12px}
+  .wrap{padding-top:12px}
+  /* шапка в одну строку: иначе страница шире экрана и телефон её уменьшает */
+  .hdr{gap:6px;padding-top:8px;padding-bottom:8px}
+  .hdr button{padding:6px 9px}
+  .logo{font-size:15px;gap:7px}
+  .status{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:4px 9px;font-size:12px}
+  .updated,#wall,#logout .u{display:none}
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
+  .kpi{padding:10px 12px}
+  .kpi .v{font-size:18px;margin-top:3px}
+  .layout,.col{gap:12px}
+  /* хост — две строки: имя и четыре цифры, без мини-графиков */
   .hhead{display:none}
-  .hrow{grid-template-columns:1fr 1fr;gap:10px 16px}
+  .hrow{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 10px;padding:10px 12px}
   .hrow .hname{grid-column:1/-1}
+  .hrow .spark,.hrow>.two:last-child{display:none}
+  .hrow .mc{display:block}
+  .hrow .mc .v{font-size:15px}
+  .hrow .dk .v{margin-bottom:4px}
+  .hrow .dk .v>span:first-child{display:none}
+  .hrow .two{font-size:11.5px;line-height:1.35}
   .hl{display:block;margin-bottom:2px}
+  .ph{padding:11px 12px;flex-wrap:wrap;row-gap:8px}
+  .ph .meta{white-space:normal}
+  #hosts-meta{display:none}
+  .hrow .two{overflow:hidden}
+  .drawer-in{padding:14px 12px 32px}
+  .drawer-h{gap:8px;margin-bottom:12px}
+  .chart{padding:10px 10px 6px}
+  .chart svg{height:130px}
+  .modal{top:16px;max-height:calc(100vh - 32px);overflow:auto}
+  .urow{grid-template-columns:100px 1fr 56px;gap:8px;padding:8px 12px}
+  .ev{padding:8px 12px}
+  .checks{grid-template-columns:1fr 1fr;gap:6px}
+  .chk{padding:8px 9px;gap:7px}
+  /* в таблице гостей на телефоне — только главное: узел, сеть и аптайм есть в панели гостя */
+  #guests-p tr>:nth-child(3),#guests-p tr>:nth-child(7),#guests-p tr>:nth-child(8){display:none}
+  .pb{padding:12px}
   .charts,.info-grid{grid-template-columns:1fr 1fr}
   .charts{grid-template-columns:1fr}
   #maint span{display:none}
@@ -776,7 +808,7 @@ function render(d) {
     : `<span class="dot live"></span>Всё в порядке`;
   setBadge(live);
   $("#updated").textContent = "обновлено " + new Date(d.now * 1000).toLocaleTimeString("ru-RU");
-  $("#userbox").innerHTML = d.auth ? `<button id="logout" title="Выйти">${esc(d.user)} ⎋</button>` : `<button id="logout" style="color:var(--warn)" title="Задай пароль командой passwd на сервере">без пароля</button>`;
+  $("#userbox").innerHTML = d.auth ? `<button id="logout" title="Выйти"><span class="u">${esc(d.user)} </span>⎋</button>` : `<button id="logout" style="color:var(--warn)" title="Задай пароль командой passwd на сервере">без пароля</button>`;
   $("#logout").onclick = async () => { if (!DATA.auth) return alert("Вход без пароля. Задай пароль на сервере:\n/opt/lumen/lumen-server.py passwd admin"); await api("api/logout", {}); location.href = "/login"; };
   $("#banners").innerHTML =
     d.silences.map(x => `<div class="banner info">🔕 <span><b>${esc(x.label)}</b> — обслуживание ещё ${fmt.dur(x.until - d.now)}${x.reason ? ` <span class="muted" style="font-weight:400">· ${esc(x.reason)}</span>` : ""}</span><button style="margin-left:auto" data-sid="${esc(x.id)}">Снять</button></div>`).join("") +
