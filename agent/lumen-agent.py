@@ -737,15 +737,68 @@ def ssh_key_names():
                         break
     SSH_KEYS.update(ts=time.time(), names=names)
     return names
-JOURNAL = {"cursor": None}
+
+
+def ssh_open():
+    """Открытые сейчас подключения к sshd (порт 22): [ip, порт клиента]. По ним сервер закрывает
+    сессии, выход из которых не попал в журнал (агент перезапускался, связь оборвалась)."""
+    out = []
+    for fn in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = read(fn).splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            local, remote, state = f[1], f[2], f[3]
+            if state != "01" or not local.endswith(":0016"):  # 01 = ESTABLISHED, 0x16 = 22
+                continue
+            addr, port = remote.split(":")
+            raw = bytes.fromhex(addr)
+            # адреса в /proc записаны 32-битными словами в порядке байт хоста
+            raw = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+            ip = socket.inet_ntop(socket.AF_INET if len(raw) == 4 else socket.AF_INET6, raw)
+            out.append([ip[7:] if ip.startswith("::ffff:") else ip, int(port, 16)])
+    return out
+
+
+JOURNAL = {"cursor": None, "saved": None}
+CURSOR_FILE = "/var/lib/lumen-agent/journal.cursor"
+
+
+def load_cursor():
+    """Место в журнале, до которого всё уже отправлено, — чтобы после перезапуска агента
+    не потерять входы и выходы, случившиеся в это время."""
+    try:
+        JOURNAL["cursor"] = JOURNAL["saved"] = read(CURSOR_FILE).strip() or None
+        LOG_STATE["ts"] = time.time()
+    except OSError:
+        pass
+
+
+def save_cursor():
+    cur = JOURNAL["cursor"]
+    if not cur or cur == JOURNAL["saved"]:
+        return
+    try:
+        os.makedirs(os.path.dirname(CURSOR_FILE), exist_ok=True)
+        with open(CURSOR_FILE + ".tmp", "w") as f:
+            f.write(cur)
+        os.replace(CURSOR_FILE + ".tmp", CURSOR_FILE)
+        JOURNAL["saved"] = cur
+    except OSError:
+        pass
 
 
 def journal(args):
-    out = subprocess.run(["journalctl", "--no-pager", "-q", "--show-cursor"] + args,
-                         capture_output=True, text=True, timeout=20).stdout.splitlines()
+    r = subprocess.run(["journalctl", "--no-pager", "-q", "--show-cursor"] + args,
+                       capture_output=True, text=True, timeout=20)
+    out = r.stdout.splitlines()
     cursor = None
     if out and out[-1].startswith("-- cursor: "):
         cursor = out.pop()[len("-- cursor: "):]
+    if r.returncode != 0 and not out and "--after-cursor" in args:
+        JOURNAL["cursor"] = None  # курсор устарел (журнал ротирован) — начнём заново с конца
     return out, cursor
 
 
@@ -1024,6 +1077,7 @@ def main():
     global SERVER_CHECKS
     last_run = {}
     system(time.time())  # первые значения счётчиков
+    load_cursor()
     errors = 0
     clock, clock_ts = {}, 0
     while True:
@@ -1057,9 +1111,12 @@ def main():
             payload["checks_local"] = CFG["checks"]
         if SSH_STATE["pending"]:
             payload["ssh_logins"] = SSH_STATE["pending"]
+        if "ssh" in CFG["modules"]:
+            payload["ssh_open"] = ssh_open()
         try:
             reply = push(payload)
             SSH_STATE["pending"] = []
+            save_cursor()  # всё прочитанное из журнала дошло до сервера
             if "checks" in reply:
                 SERVER_CHECKS = reply["checks"]
             errors = 0

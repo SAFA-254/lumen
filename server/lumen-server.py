@@ -316,6 +316,13 @@ def ingest(p):
                        "VALUES(?,?,?,?,?,?,?,?,?,?)", logins)
         db.executemany("UPDATE logins SET end=? WHERE host=? AND ip=? AND port=? AND user=? AND end IS NULL "
                        "AND fail=0", logouts)
+        if isinstance(p.get("ssh_open"), list):
+            # сессия числится открытой, а подключения уже нет — выход не попал в журнал агента
+            alive = {(str(x[0]), int(x[1])) for x in p["ssh_open"] if isinstance(x, list) and len(x) == 2}
+            gone = [(now, rowid) for rowid, ip, port in db.execute(
+                "SELECT rowid, ip, port FROM logins WHERE host=? AND end IS NULL AND fail=0 AND port IS NOT NULL "
+                "AND ts < ?", (host, now - 30)) if (ip, port) not in alive]
+            db.executemany("UPDATE logins SET end=? WHERE rowid=?", gone)
         for kind, data in (p.get("cluster") or {}).items():
             if data is not None:
                 db.execute("INSERT OR REPLACE INTO cluster VALUES(?,?,?,?)", (kind, now, host, json.dumps(data)))
