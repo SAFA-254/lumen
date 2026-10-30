@@ -7,7 +7,9 @@ ExecStart=/usr/bin/python3 /opt/lumen/lumen-agent.py
 Restart=always
 RestartSec=10
 Nice=10
-MemoryMax=100M
+# Сюда считается и кэш журнала от journalctl: при 100M код агента вытеснялся и читался с диска по кругу
+MemoryMax=300M
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

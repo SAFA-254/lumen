@@ -1,34 +1,45 @@
 #!/bin/bash
-# Обновление Lumen. Сервер живёт в CT 108 (lumen, https://192.168.3.7) на pve2, агенты — на pve1-3,
+# Обновление Lumen. Сервер живёт в CT 108 (lumen, https://192.168.3.7), агенты — на pve1-3,
 # в CT 101 (etcd-arbiter), CT 108 и в VM 104-106 (ставятся через qemu-guest-agent).
 # Запускать на pve1 из /root/lumen. Существующие конфиги (/etc/lumen/*.json, telegram.env, ключ TLS)
 # не трогаются — обновляются код, юниты и сертификат сервера; агенту в VM конфиг создаётся только при первой установке.
 set -euo pipefail
 cd "$(dirname "$0")"
-CT_NODE=root@192.168.3.4   # pve2: там CT 101 и CT 108
 SERVER=https://192.168.3.7
 TOKEN=$(python3 -c 'import json;print(json.load(open("/etc/lumen/agent.json"))["token"])')
 # VM: vmid -> модули агента
 declare -A VM_MODULES=([104]='["system","ssh","logs","procs","updates"]' [105]='["system","ssh","logs","procs","updates","postgres"]' [106]='["system","ssh","logs","procs","updates","postgres"]')
 
+# Гости под HA переезжают между узлами, поэтому узел определяем при каждом запуске
+node_of() {
+  pvesh get /cluster/resources --type vm --output-format json | python3 -c "
+import json, sys
+print(next(r['node'] for r in json.load(sys.stdin) if r['vmid'] == $1))"
+}
+ip_of_node() { getent hosts "$1" | awk '{print $1; exit}'; }
+
 push_ct() { # ct файл-на-узле путь-в-ct [права]
   ssh $CT_NODE "pct push $1 $2 $3 ${4:+--perms $4}"
 }
-
-tmp=$(ssh $CT_NODE mktemp -d)
-tar -czf - -C server lumen-server.py tg-notify.py web | ssh $CT_NODE "cat > $tmp/app.tgz"
-scp -q agent/lumen-agent.py deploy/lumen-server.service deploy/lumen-agent.service deploy/server.crt $CT_NODE:$tmp/
+ct_begin() { # ct: выбрать узел контейнера и положить на него файлы
+  CT_NODE=root@$(ip_of_node "$(node_of $1)")
+  tmp=$(ssh $CT_NODE mktemp -d)
+  scp -q agent/lumen-agent.py deploy/lumen-server.service deploy/lumen-agent.service deploy/server.crt $CT_NODE:$tmp/
+}
 
 echo "== CT 108 lumen: сервер + агент"
+ct_begin 108
+tar -czf - -C server lumen-server.py tg-notify.py web | ssh $CT_NODE "cat > $tmp/app.tgz"
 push_ct 108 $tmp/app.tgz /tmp/app.tgz
 push_ct 108 $tmp/lumen-agent.py /opt/lumen/lumen-agent.py
 push_ct 108 $tmp/lumen-server.service /etc/systemd/system/lumen-server.service
 push_ct 108 $tmp/lumen-agent.service /etc/systemd/system/lumen-agent.service
 push_ct 108 $tmp/server.crt /etc/lumen/server.crt 644
 ssh $CT_NODE "pct exec 108 -- sh -c 'tar -C /opt/lumen -xzf /tmp/app.tgz && rm /tmp/app.tgz && chmod 755 /opt/lumen/tg-notify.py /opt/lumen/lumen-server.py \
-  && systemctl daemon-reload && systemctl restart lumen-server lumen-agent'"
+  && systemctl daemon-reload && systemctl restart lumen-server lumen-agent'; rm -rf $tmp"
 
 echo "== CT 101 etcd-arbiter: агент"
+ct_begin 101
 push_ct 101 $tmp/lumen-agent.py /opt/lumen/lumen-agent.py
 push_ct 101 $tmp/lumen-agent.service /etc/systemd/system/lumen-agent.service
 push_ct 101 $tmp/server.crt /etc/lumen/server.crt 644
@@ -57,12 +68,6 @@ d = json.load(sys.stdin)
 sys.stdout.write(d.get("out-data", "")); sys.stderr.write(d.get("err-data", ""))
 sys.exit(d.get("exitcode", 1))'
 }
-node_of() {
-  pvesh get /cluster/resources --type vm --output-format json | python3 -c "
-import json, sys
-print(next(r['node'] for r in json.load(sys.stdin) if r['vmid'] == $1))"
-}
-ip_of_node() { getent hosts "$1" | awk '{print $1; exit}'; }
 
 for vmid in "${!VM_MODULES[@]}"; do
   node=$(ip_of_node "$(node_of $vmid)")
