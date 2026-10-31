@@ -118,6 +118,7 @@ CFG = load_config()
 class Store:
     def __init__(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.chmod(os.path.dirname(path), 0o700)  # в базе история входов и хеши сессий
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.lock = threading.Lock()
         self.db.executescript("""
@@ -140,6 +141,9 @@ class Store:
         CREATE TABLE IF NOT EXISTS logins(host TEXT, ts REAL, user TEXT, ip TEXT, method TEXT, known INTEGER);
         CREATE INDEX IF NOT EXISTS logins_ts ON logins(ts);
         """)
+        for ext in ("", "-wal", "-shm"):
+            if os.path.exists(path + ext):
+                os.chmod(path + ext, 0o600)
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(logins)")}
         for col, typ in (("port", "INTEGER"), ("end", "REAL"), ("key", "TEXT"), ("fail", "INTEGER DEFAULT 0")):
             if col not in cols:  # база от прежней версии: входы без выходов и неудачных попыток
@@ -211,7 +215,7 @@ def validate_check(c):
             out["expect_text"] = str(c["expect_text"])[:200]
     else:
         host = str(c.get("host", "")).strip()
-        if not re.match(r"^[\w.\-:]+$", host):
+        if not re.match(r"^[\w.:][\w.\-:]*$", host):
             raise ValueError(f"проверка «{name}»: неверный адрес")
         out["host"] = host
         if t == "tcp":
@@ -1360,6 +1364,14 @@ def check_password(pw, stored):
         return False
 
 
+def pw_fp(stored):
+    """Отпечаток хеша пароля: сессия перестаёт действовать, когда пароль сменили или пользователя убрали."""
+    return hashlib.sha256(stored.encode()).hexdigest()[:16] if stored else None
+
+
+DUMMY_HASH = hash_password("lumen-dummy")  # чтобы вход с неизвестным именем занимал столько же времени
+
+
 class Sessions:
     """Сессии хранятся как sha256 от токена, чтобы утечка базы не давала готовых cookie."""
 
@@ -1376,14 +1388,21 @@ class Sessions:
         tok = secrets.token_urlsafe(32)
         with self.lock:
             self.data[self._h(tok)] = {"user": user, "ip": ip, "created": time.time(),
-                                       "exp": time.time() + CFG["session_days"] * 86400}
+                                       "exp": time.time() + CFG["session_days"] * 86400, "pw": pw_fp(users().get(user))}
             self.data = {k: v for k, v in self.data.items() if v["exp"] > time.time()}
             S.meta_set("sessions", self.data)
         return tok
 
     def user(self, tok):
         s = self.data.get(self._h(tok)) if tok else None
-        return s["user"] if s and s["exp"] > time.time() else None
+        if not s or s["exp"] <= time.time():
+            return None
+        fp = pw_fp(users().get(s["user"]))
+        if not fp:
+            return None
+        if s.get("pw") is None:
+            s["pw"] = fp  # сессия создана до привязки к паролю
+        return s["user"] if s["pw"] == fp else None
 
     def drop(self, tok):
         with self.lock:
@@ -1393,6 +1412,8 @@ class Sessions:
     def blocked(self, ip):
         now = time.time()
         self.fails[ip] = [t for t in self.fails.get(ip, []) if now - t < LOGIN_LIMIT[1]]
+        if len(self.fails) > 1000:  # адреса, с которых давно не пробовали, не копим
+            self.fails = {k: v for k, v in self.fails.items() if v}
         return len(self.fails[ip]) >= LOGIN_LIMIT[0]
 
     def failed(self, ip):
@@ -1588,7 +1609,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def send(self, code, body, ctype="application/json", headers=()):
+    def send(self, code, body, ctype="application/json", headers=(), csp="default-src 'none'; frame-ancestors 'none'"):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
@@ -1597,6 +1618,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if CFG["tls_cert"]:
             self.send_header("Strict-Transport-Security", "max-age=31536000")
         for k, v in headers:
@@ -1625,15 +1651,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send(302, b"", "text/plain", [("Location", "/login")])
         return None
 
-    def read_json(self):
+    def body_len(self):
         n = int(self.headers.get("Content-Length", 0))
-        if n > 4 * 1024 * 1024:
-            raise ValueError("too big")
-        return json.loads(self.rfile.read(n) or b"{}")
+        if not 0 <= n <= 4 * 1024 * 1024:
+            raise ValueError("bad content length")
+        return n
+
+    def read_json(self):
+        return json.loads(self.rfile.read(self.body_len()) or b"{}")
 
     def static(self, name):
+        # скрипты страницы запускаются только с одноразовым номером: внедрённый в данные <script> и
+        # обработчики onclick="…" не выполнятся, даже если где-то пропущено экранирование
+        nonce = secrets.token_urlsafe(16)
         with open(os.path.join(CFG["web"], name), "rb") as f:
-            return self.send(200, f.read(), "text/html; charset=utf-8")
+            page = f.read().replace(b"<script>", f'<script nonce="{nonce}">'.encode())
+        csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+               "font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; "
+               "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        return self.send(200, page, "text/html; charset=utf-8", csp=csp)
 
     # ---- POST
     def do_POST(self):
@@ -1685,7 +1721,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(429, {"error": "слишком много попыток, подождите 10 минут"})
         user, pw = str(body.get("user", "")), str(body.get("password", ""))
         stored = users().get(user)
-        if not stored or not check_password(pw, stored):
+        if not check_password(pw, stored or DUMMY_HASH) or not stored:
             SESSIONS.failed(ip)
             time.sleep(1)
             if SESSIONS.blocked(ip):
@@ -1697,13 +1733,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, {"ok": True}, headers=[("Set-Cookie", self.cookie(tok, CFG["session_days"] * 86400))])
 
     def push(self):
-        if not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {CFG['token']}"):
+        # сравнение байтов: строка с не-ASCII символами вызвала бы исключение
+        if not hmac.compare_digest(self.headers.get("Authorization", "").encode("utf-8", "replace"),
+                                   f"Bearer {CFG['token']}".encode()):
             return self.send(403, {"error": "bad token"})
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            if n > 4 * 1024 * 1024:
-                return self.send(413, {"error": "too big"})
-            return self.send(200, ingest(json.loads(self.rfile.read(n))))
+            return self.send(200, ingest(json.loads(self.rfile.read(self.body_len()))))
         except Exception as e:
             return self.send(400, {"error": repr(e)})
 

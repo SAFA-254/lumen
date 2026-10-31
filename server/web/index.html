@@ -471,7 +471,7 @@ body.wall .status{font-size:15px;padding:7px 14px}
       <section class="panel" id="disks-p"></section>
     </div>
     <div class="col" id="col-r">
-      <section class="panel" id="events-p"><div class="ph"><h3>События</h3><button class="link" onclick="openDrawer('@history')">история алертов →</button><span class="meta">последние 40</span></div><div class="events" id="events"></div></section>
+      <section class="panel" id="events-p"><div class="ph"><h3>События</h3><button class="link" data-open="@history">история алертов →</button><span class="meta">последние 40</span></div><div class="events" id="events"></div></section>
       <section class="panel" id="ceph-p"></section>
       <section class="panel" id="patroni-p"></section>
       <section class="panel" id="logs-p"></section>
@@ -497,6 +497,8 @@ body.wall .status{font-size:15px;padding:7px 14px}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+// обработчики onclick="…" запрещены политикой безопасности, поэтому ссылки открывают панели через data-open
+document.addEventListener("click", e => { const b = e.target.closest("[data-open]"); if (b) openDrawer(b.dataset.open); });
 
 const fmt = {
   pct: v => v == null ? "—" : (v >= 10 ? v.toFixed(0) : v.toFixed(1)),
@@ -810,8 +812,8 @@ function renderMap(pv) {
       ${up ? `<div class="node-rings">${ring(n.name + ":cpu", cpu, "CPU", 80, 95)}${ring(n.name + ":mem", mem, "RAM", 85, 95)}</div>` : `<div class="empty" style="padding:14px 0;color:var(--crit)">узел недоступен</div>`}
       <div class="gtiles">${gs.map(g => {
         const run = g.status == "running", cp = 100 * (g.cpu || 0), mv = MOVED[g.vmid], role = roles[g.name];
-        return `<div class="gt ${run ? level(cp, 70, 90) : "off"} ${mv ? "moved" : ""}" data-vm="${g.vmid}" title="${esc(`${g.vmid} ${g.name} · ${g.status}${run ? ` · CPU ${cp.toFixed(0)}% · RAM ${fmt.bytes(g.mem)} / ${fmt.bytes(g.maxmem)}` : ""}${mv ? ` · переехал с ${mv.from}` : ""}`)}">
-          <b>${esc(g.name)}</b><span>${mv ? `↪ с ${esc(mv.from)}` : `${role ? `<i class="role ${role}">${role == "leader" ? "лидер" : "реплика"}</i>` : `${g.vmid} · ${g.type == "lxc" ? "CT" : "VM"}`}${run ? ` · ${cp.toFixed(0)}%` : ""}`}</span></div>`;
+        return `<div class="gt ${run ? level(cp, 70, 90) : "off"} ${mv ? "moved" : ""}" data-vm="${esc(g.vmid)}" title="${esc(`${esc(g.vmid)} ${g.name} · ${g.status}${run ? ` · CPU ${cp.toFixed(0)}% · RAM ${fmt.bytes(g.mem)} / ${fmt.bytes(g.maxmem)}` : ""}${mv ? ` · переехал с ${mv.from}` : ""}`)}">
+          <b>${esc(g.name)}</b><span>${mv ? `↪ с ${esc(mv.from)}` : `${role ? `<i class="role ${role}">${role == "leader" ? "лидер" : "реплика"}</i>` : `${esc(g.vmid)} · ${g.type == "lxc" ? "CT" : "VM"}`}${run ? ` · ${cp.toFixed(0)}%` : ""}`}</span></div>`;
       }).join("") || `<span class="faint" style="font-size:12px">пусто</span>`}</div></div>`;
   }).join("")}</div>${buses}`;
   el.querySelectorAll(".gt").forEach(t => t.onclick = () => openDrawer("@vm:" + t.dataset.vm));
@@ -829,8 +831,8 @@ function renderGuests(pv) {
   else if (GFILTER != "all") guests = guests.filter(g => g.node == GFILTER);
   const rows = guests.map(g => {
     const run = g.status == "running", mem = g.maxmem ? 100 * g.mem / g.maxmem : 0, cpu = 100 * (g.cpu || 0);
-    return `<tr class="click ${run ? "" : "off"}" data-vm="${g.vmid}">
-      <td class="faint">${g.vmid}</td>
+    return `<tr class="click ${run ? "" : "off"}" data-vm="${esc(g.vmid)}">
+      <td class="faint">${esc(g.vmid)}</td>
       <td><b style="font-weight:600">${esc(g.name)}</b> <span class="tag">${g.type == "lxc" ? "CT" : "VM"}</span></td>
       <td class="muted">${esc(g.node)}</td>
       <td><span class="dot ${run ? "" : "off"}" style="width:7px;height:7px;margin-right:6px"></span>${run ? "работает" : esc(g.status)}</td>
@@ -855,7 +857,7 @@ function renderChecks(cl) {
   if (!all.length) { el.innerHTML = panelHead("Сервисы") + `<div class="empty">Проверки не настроены: добавь их в настройках</div>`; return; }
   all.sort((a, b) => a.ok - b.ok || a.name.localeCompare(b.name));
   const bad = all.filter(c => !c.ok).length;
-  el.innerHTML = panelHead("Сервисы", `<span class="badge ${bad ? "crit" : ""}">${bad ? bad + " не отвечает" : "все отвечают"}</span><button class="link" onclick="openDrawer('@checks')">время ответа →</button>`,
+  el.innerHTML = panelHead("Сервисы", `<span class="badge ${bad ? "crit" : ""}">${bad ? bad + " не отвечает" : "все отвечают"}</span><button class="link" data-open="@checks">время ответа →</button>`,
       `с ${esc([...new Set(all.map(c => c.src))].join(", "))} · ${fmt.ago(all[0].age)}`) +
     `<div class="pb"><div class="checks">${all.map(c => {
       const cd = c.cert_days, certLv = cd == null ? "" : cd < 3 ? "crit" : cd < 30 ? "warn" : "";
@@ -874,7 +876,7 @@ function renderCeph(c, forecast) {
   const lat = c.osd_lat ? Object.entries(c.osd_lat).sort((a, b) => b[1] - a[1])[0] : null;
   const pgsBad = c.pgs.states.filter(s => s.state_name != "active+clean");
   const fc = (forecast || []).find(f => f.host == "_ceph");
-  el.innerHTML = panelHead("Ceph", `<span class="badge ${hl}">${esc(c.health)}</span><button class="link" onclick="openDrawer('@ceph')">графики →</button>`, fmt.ago(c._age)) +
+  el.innerHTML = panelHead("Ceph", `<span class="badge ${hl}">${esc(c.health)}</span><button class="link" data-open="@ceph">графики →</button>`, fmt.ago(c._age)) +
     `<div class="pb">
       ${c.checks.map(x => `<div class="banner ${x.severity == "HEALTH_ERR" ? "crit" : "warn"}" style="margin-bottom:10px;font-size:12.5px">${esc(x.msg)}</div>`).join("")}
       <div class="stats">
@@ -909,7 +911,7 @@ function renderPatroni(p, cl) {
   }).join("");
   const etcd = Object.entries(p.etcd || {}).map(([ep, s]) => `<div class="li"><span class="dot ${s.ok ? "" : "crit"}"></span><span>${esc(ep.split(":")[0])}</span>
       <span class="end num">${s.ok ? `ответ ${s.ms} мс · fsync ${s.fsync_ms != null ? `<b style="color:${s.fsync_ms > 100 ? "var(--warn)" : "var(--text)"};font-weight:500">${s.fsync_ms.toFixed(1)} мс</b>` : "—"}` : `<span style="color:var(--crit)">${esc(s.err || "fail")}</span>`}</span></div>`).join("");
-  el.innerHTML = panelHead("PostgreSQL", `<span class="badge ${ok ? "" : "crit"}">${ok ? "OK" : "проблема"}</span><button class="link" onclick="openDrawer('@patroni')">графики →</button>`, esc(p.scope || "")) +
+  el.innerHTML = panelHead("PostgreSQL", `<span class="badge ${ok ? "" : "crit"}">${ok ? "OK" : "проблема"}</span><button class="link" data-open="@patroni">графики →</button>`, esc(p.scope || "")) +
     (p.error ? `<div class="banner crit" style="margin:12px 16px 0">${esc(p.error)}</div>` : "") +
     `<div class="list" style="padding:4px 0">${members}</div>` +
     (dbs ? `<div class="sub-h">Базы</div><div class="list">${dbs}</div>` : "") +
@@ -923,7 +925,7 @@ function renderBackups(b, pv) {
   const names = Object.fromEntries((pv?.guests || []).map(g => [g.vmid, g.name]));
   const rows = [...b.guests].sort((a, c) => a.last - c.last).map(g => {
     const age = now - g.last, lv = g.stale ? "crit" : g.work_age > 26 * 3600 ? "warn" : "";
-    return `<div class="li"><span class="faint num" style="width:28px">${g.vmid}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(names[g.vmid] || g.name)}</span>
+    return `<div class="li"><span class="faint num" style="width:28px">${esc(g.vmid)}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(names[g.vmid] || g.name)}</span>
       <span class="end num"><span style="color:${lv ? `var(--${lv})` : "var(--text)"}">${fmt.short(age)} назад</span> · ${fmt.bytes(g.size)}${g.verified == "ok" ? " · ✓" : g.verified ? ` · <span style="color:var(--crit)">${esc(g.verified)}</span>` : ""}</span></div>`;
   }).join("");
   const tasks = b.tasks.slice(0, 4).map(t => `<div class="ev"><time class="num">${fmt.time(t.starttime, true).split(" ")[0]}</time>
@@ -1023,7 +1025,7 @@ function renderSSH(logins, now) {
   const unknown = logins.filter(l => !l.known && now - l.ts < 86400).length, active = logins.filter(l => l.tracked && !l.end).length;
   const nf = fails.reduce((a, f) => a + f.n, 0);
   el.innerHTML = `<div class="ph"><h3>Входы по SSH</h3>${active ? `<span class="badge">${active} сейчас в системе</span>` : ""}${unknown ? `<span class="badge warn">${unknown} с незнакомых адресов</span>` : ""}${nf ? `<span class="badge crit">${nf} неудачных за сутки</span>` : ""}
-    <button class="link" onclick="openDrawer('@ssh')">вся история →</button><span class="meta">за 7 дней${logins.length >= 150 ? ", последние 150" : ""}</span></div>` +
+    <button class="link" data-open="@ssh">вся история →</button><span class="meta">за 7 дней${logins.length >= 150 ? ", последние 150" : ""}</span></div>` +
     `<div class="sbody">${fails.slice(0, 3).map(f => failLine(f, now)).join("")}` +
     (logins.length ? `<div style="padding-bottom:4px">${SSH_HEAD}${sshGroups(logins).map(l => sshRow(l, now)).join("")}</div>`
       : `<div class="empty">Входов пока не было. Отслеживаются с момента запуска агентов.</div>`) + `</div>`;
@@ -1285,7 +1287,7 @@ function procTable(name) {
   const tabs = [["cpu", "CPU"], ["mem", "память"], ["io", "диск"]].map(([k, l]) => `<button data-ps="${k}" class="${k == PSORT ? "on" : ""}">${l}</button>`).join("");
   return panelHead("Процессы", `<div class="filters">${tabs}</div>`, `всего ${pr.count} · за ${pr.window} с · ${fmt.ago(pr._age)}`) +
     `<div class="tbl"><table class="ptable"><tr><th>PID</th><th>Процесс</th><th class="r">CPU</th><th class="r">Память</th><th class="r">Чтение</th><th class="r">Запись</th><th>Команда</th></tr>${rows.map(r => `<tr>
-      <td class="faint num">${r.pid}</td><td><b style="font-weight:600">${esc(r.name)}</b></td>
+      <td class="faint num">${esc(r.pid)}</td><td><b style="font-weight:600">${esc(r.name)}</b></td>
       <td class="r num" style="color:${r.cpu > 50 ? "var(--warn)" : ""}">${r.cpu.toFixed(1)}%</td><td class="r num">${fmt.bytes(r.rss)}</td>
       <td class="r num muted">${r.rd != null ? fmt.rate(r.rd) : "—"}</td><td class="r num muted">${r.wr != null ? fmt.rate(r.wr) : "—"}</td>
       <td class="cmd" title="${esc(r.cmd)}">${esc(r.cmd)}</td></tr>`).join("")}</table></div>`;
@@ -1316,7 +1318,7 @@ async function drawVM(vmid) {
   const run = g.status == "running";
   $("#drawer-in").innerHTML = `
     <div class="drawer-h"><span class="dot ${run ? "" : "off"}"></span><h3>${esc(g.name)}</h3>
-      <span class="muted">${g.type == "lxc" ? "контейнер" : "VM"} ${g.vmid} · ${esc(g.node)} · ${run ? "работает " + fmt.dur(g.uptime) : esc(g.status)}</span><span class="spacer"></span>${rangeBtns()}</div>
+      <span class="muted">${g.type == "lxc" ? "контейнер" : "VM"} ${esc(g.vmid)} · ${esc(g.node)} · ${run ? "работает " + fmt.dur(g.uptime) : esc(g.status)}</span><span class="spacer"></span>${rangeBtns()}</div>
     <div class="info-grid">
       <div class="stat"><div class="l">CPU</div><div class="v num">${run ? (100 * g.cpu).toFixed(0) + "%" : "—"} <span class="faint" style="font-size:12px">из ${g.maxcpu} vCPU</span></div></div>
       <div class="stat"><div class="l">Память</div><div class="v num">${run ? fmt.bytes(g.mem) : "—"} / ${fmt.bytes(g.maxmem)}</div></div>
@@ -1395,7 +1397,7 @@ function rbdTable() {
   const lat = v => `<span style="color:${v > 100 ? "var(--crit)" : v > 30 ? "var(--warn)" : ""}">${v.toFixed(1)} мс</span>`;
   return `<div class="panel" style="margin-top:12px">${panelHead("Нагрузка на Ceph по дискам VM", "", "за последние ~30 с")}
     <div class="tbl"><table><tr><th>Диск</th><th>Гость</th><th class="r">Чтение</th><th class="r">Запись</th><th class="r">Операций/с</th><th class="r">Задержка чтения</th><th class="r">Задержка записи</th></tr>
-    ${rows.map(i => `<tr class="${i.vmid != null ? "click" : ""}" data-vm="${i.vmid ?? ""}"><td class="muted">${esc(i.pool)}/${esc(i.image)}</td><td><b style="font-weight:600">${esc(names[i.vmid] || "")}</b> <span class="faint">${i.vmid ?? ""}</span></td>
+    ${rows.map(i => `<tr class="${i.vmid != null ? "click" : ""}" data-vm="${esc(i.vmid)}"><td class="muted">${esc(i.pool)}/${esc(i.image)}</td><td><b style="font-weight:600">${esc(names[i.vmid] || "")}</b> <span class="faint">${esc(i.vmid)}</span></td>
       <td class="r num">${fmt.rate(i.rd)}</td><td class="r num">${fmt.rate(i.wr)}</td><td class="r num muted">${(i.rd_ops + i.wr_ops).toFixed(0)}</td>
       <td class="r num">${i.rd_ops ? lat(i.rd_lat) : "—"}</td><td class="r num">${i.wr_ops ? lat(i.wr_lat) : "—"}</td></tr>`).join("")}</table></div></div>`;
 }

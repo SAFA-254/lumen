@@ -642,7 +642,9 @@ def check_one(c):
             socket.create_connection((c["host"], c["port"]), timeout=timeout).close()
             res["ok"] = True
         elif t == "ping":
-            p = subprocess.run(["ping", "-c", "1", "-W", str(timeout), c["host"]], capture_output=True, text=True,
+            if str(c["host"]).startswith("-"):
+                raise ValueError("неверный адрес")  # иначе адрес стал бы параметром ping
+            p = subprocess.run(["ping", "-c", "1", "-W", str(timeout), "--", c["host"]], capture_output=True, text=True,
                                timeout=timeout + 2)
             m = re.search(r"time=([\d.]+)", p.stdout)
             res["ok"] = p.returncode == 0
