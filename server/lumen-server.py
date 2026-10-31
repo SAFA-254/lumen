@@ -1469,7 +1469,8 @@ def overview():
     silences = [dict(x, label=scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
     logins = ssh_sessions(150, now - 7 * 86400)  # панель прокручивается — показываем неделю
     return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events,
-            "silences": silences, "logins": logins, "ssh_fails": ssh_fails(now - 86400), "forecast": forecasts()}
+            "silences": silences, "logins": logins, "ssh_fails": ssh_fails(now - 86400), "forecast": forecasts(),
+            "day": day_strip(now)}
 
 
 def annotations(scope, start, end):
@@ -1485,6 +1486,19 @@ def annotations(scope, start, end):
             out.append({"kind": "maint", "msg": "Обслуживание: " + scope_label(sc) + (f" — {reason}" if reason else ""),
                         "start": s, "end": e})
     return out
+
+
+def day_strip(now):
+    # тревоги за сутки и периоды, когда сам сервер не получал данные (тогда и алерты не записывались)
+    since = now - 86400
+    alerts = [{"level": l, "msg": m, "start": a, "end": e} for l, m, a, e in S.q(
+        "SELECT level, msg, start, end FROM alert_log WHERE muted=0 AND (end IS NULL OR end > ?)", (since,))]
+    gaps, prev = [], since
+    for t in [r[0] for r in S.q("SELECT DISTINCT ts FROM raw WHERE metric='cpu' AND ts > ? ORDER BY ts", (int(since),))] + [now]:
+        if t - prev > 300:
+            gaps.append([prev, t])
+        prev = t
+    return {"alerts": alerts, "gaps": gaps}
 
 
 def alert_history(days):
