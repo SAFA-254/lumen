@@ -312,6 +312,10 @@ def ingest(p):
     def w(db):
         db.execute("INSERT OR REPLACE INTO hosts VALUES(?,?,?)", (host, now, json.dumps(latest)))
         db.executemany("INSERT INTO raw VALUES(?,?,?,?)", rows)
+        # агент шлёт входы повторно, если не дождался ответа, хотя сервер их уже сохранил
+        logins[:] = [x for x in logins if not db.execute(
+            "SELECT 1 FROM logins WHERE host=? AND ts=? AND user=? AND ip=? AND port IS ? AND fail=?",
+            (x[0], x[1], x[2], x[3], x[6], x[9])).fetchone()]
         db.executemany("INSERT INTO logins(host, ts, user, ip, method, known, port, end, key, fail) "
                        "VALUES(?,?,?,?,?,?,?,?,?,?)", logins)
         db.executemany("UPDATE logins SET end=? WHERE host=? AND ip=? AND port=? AND user=? AND end IS NULL "
@@ -841,7 +845,7 @@ class Alerts:
             S.meta_set("bk_failed_seen", sorted(seen)[-200:])
             max_age = r["backup_max_age_h"] * 3600
             for g in bk.get("guests", []):
-                if g.get("last") and now - g["last"] > max_age:
+                if g.get("last") and backup_work_age(g["last"], now) > max_age:
                     found[f"bk:{g['vmid']}"] = ("warn", f"Бэкап {g['vmid']} {g.get('name', '')}: "
                                                         f"последний {int((now - g['last']) / 3600)} ч назад", 0)
 
@@ -999,6 +1003,18 @@ def fmt_minutes(m):
     return f"{m // 60} ч" + (f" {m % 60} мин" if m % 60 else "") if m >= 60 else f"{m} мин"
 
 
+def backup_work_age(last, now):
+    # задание бэкапов идёт только по будням, поэтому субботу и воскресенье в возраст не считаем
+    age, t = 0, last
+    while t < now:
+        d = time.localtime(t)
+        nxt = min(now, time.mktime((d.tm_year, d.tm_mon, d.tm_mday + 1, 0, 0, 0, 0, 0, -1)))
+        if d.tm_wday < 5:
+            age += nxt - t
+        t = nxt
+    return age
+
+
 def fmt_dur(sec):
     sec = int(sec)
     if sec >= 86400:
@@ -1074,7 +1090,7 @@ def morning_summary():
     if bk:
         tasks = [t for t in bk.get("tasks", []) if t["starttime"] > day]
         bad = [t for t in tasks if t.get("status") not in (None, "OK")]
-        stale = [g for g in bk.get("guests", []) if now - g["last"] > rules()["backup_max_age_h"] * 3600]
+        stale = [g for g in bk.get("guests", []) if backup_work_age(g["last"], now) > rules()["backup_max_age_h"] * 3600]
         out.append(f"Бэкапы: заданий {len(tasks)}, с ошибкой {len(bad)}; "
                    + (f"устарели: {', '.join(str(g['vmid']) for g in stale)}" if stale else "все гости свежие"))
     peaks = S.q("SELECT host, metric, MAX(v) FROM raw WHERE ts > ? AND metric IN ('cpu','mem') "
@@ -1442,6 +1458,9 @@ def overview():
     for k, ts, src, d in S.q("SELECT kind, ts, src, data FROM cluster"):
         data = json.loads(d)
         cluster[k] = dict(data if isinstance(data, dict) else {"items": data}, _age=now - ts, _src=src)
+    for g in cluster.get("backups", {}).get("guests", []):
+        g["work_age"] = backup_work_age(g["last"], now)
+        g["stale"] = g["work_age"] > rules()["backup_max_age_h"] * 3600
     events = [{"ts": t, "level": l, "msg": m}
               for t, l, m in S.q("SELECT ts, level, msg FROM events ORDER BY ts DESC LIMIT 40")]
     alerts = sorted([dict({k: v for k, v in a.items() if k != "log_id"}, key=k, muted=ALERTS.silenced(k))
