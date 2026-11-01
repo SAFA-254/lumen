@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Отправка алерта в Telegram. Использование: tg-notify.py "текст".
-Токен и чат берутся из /etc/lumen/telegram.env (TELEGRAM_TOKEN=..., TELEGRAM_CHAT=...).
+Токен и чат берутся из /etc/luxmon/telegram.env (TELEGRAM_TOKEN=..., TELEGRAM_CHAT=...).
 С 23:00 до 08:00 сообщения приходят без звука; TG_SILENT=1/0 переопределяет."""
 import os
 import ssl
@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 
 env = {}
-with open(os.environ.get("LUMEN_TG_ENV", "/etc/lumen/telegram.env")) as f:
+with open(os.environ.get("LUXMON_TG_ENV", "/etc/luxmon/telegram.env")) as f:
     for line in f:
         if "=" in line and not line.startswith("#"):
             k, v = line.strip().split("=", 1)

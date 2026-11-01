@@ -1,6 +1,11 @@
-# Lumen
+# Luxmon
 
 Лёгкий мониторинг для небольшого кластера Proxmox VE. Агенты на хостах раз в 15 секунд отправляют метрики на сервер по HTTPS, сервер хранит их в SQLite, показывает дашборд за паролем и шлёт алерты, утреннюю сводку и ответы на команды в Telegram.
+
+Проект состоит из двух частей:
+
+- **Alpha Luxmon** — ядро: агент (`agent/`) и сервер (`server/luxmon-server.py`, `server/luxmon/`), то есть сбор и приём данных, алерты, отчёты, бот и API;
+- **Omega Luxmon** — веб-панель (`server/web/`), работает через API ядра.
 
 Без зависимостей: только Python 3 из стандартной поставки и один HTML-файл. Агент и сервер занимают примерно по 20–40 МБ памяти.
 
@@ -66,11 +71,11 @@
 - узел Proxmox не в сети;
 - сетевой канал загружен выше порога; ошибок в журнале больше порога; iowait выше порога;
 - нагрузка (CPU, iowait, диск, сеть) в несколько раз выше обычной для этого часа — по истории прошлых дней;
-- сам агент Lumen тратит слишком много CPU или диска; время не синхронизировано или часы расходятся;
+- сам агент Luxmon тратит слишком много CPU или диска; время не синхронизировано или часы расходятся;
 - PBS: очистка, прореживание или проверка завершились с ошибкой или давно не проходили;
 - SMART: тест не пройден, есть нечитаемые сектора, износ SSD, перегрев диска; рост счётчиков ошибок (в т.ч. CRC — обычно кабель) приходит сразу;
 - сертификат HTTPS проверяемого сервиса скоро истечёт;
-- вход по SSH с адреса не из списка известных; 5 и больше неудачных попыток входа с одного адреса за 10 минут; 5 неудачных попыток входа в Lumen с одного адреса.
+- вход по SSH с адреса не из списка известных; 5 и больше неудачных попыток входа с одного адреса за 10 минут; 5 неудачных попыток входа в Luxmon с одного адреса.
 
 ## Режим обслуживания
 
@@ -78,13 +83,13 @@
 
 ## Telegram
 
-- по понедельникам вместе со сводкой приходят итоги недели: доступность хостов, сервисов и самого Lumen, частые алерты, рост дисков, пики сети, ошибки журналов, бэкапы и PBS, ожидающие обновления, входы по SSH;
-- алерты и утренняя сводка идут через `notify_cmd` (`tg-notify.py`, токен и чат в `/etc/lumen/telegram.env`);
-- команды `/status`, `/alerts`, `/mute pve2 1h причина`, `/unmute`, `/summary`, `/week` принимает отдельный бот: добавь `LUMEN_BOT_TOKEN=...` в `telegram.env` (основной бот нельзя: его уже опрашивает alertmanager-bot, а Telegram не даёт двум программам читать сообщения одного бота). Команды принимаются только из чатов `LUMEN_BOT_CHATS` (по умолчанию `TELEGRAM_CHAT`).
+- по понедельникам вместе со сводкой приходят итоги недели: доступность хостов, сервисов и самого Luxmon, частые алерты, рост дисков, пики сети, ошибки журналов, бэкапы и PBS, ожидающие обновления, входы по SSH;
+- алерты и утренняя сводка идут через `notify_cmd` (`tg-notify.py`, токен и чат в `/etc/luxmon/telegram.env`);
+- команды `/status`, `/alerts`, `/mute pve2 1h причина`, `/unmute`, `/summary`, `/week` принимает отдельный бот: добавь `LUXMON_BOT_TOKEN=...` в `telegram.env` (основной бот нельзя: его уже опрашивает alertmanager-bot, а Telegram не даёт двум программам читать сообщения одного бота). Команды принимаются только из чатов `LUXMON_BOT_CHATS` (по умолчанию `TELEGRAM_CHAT`).
 
 ## Вход и HTTPS
 
-- пароль задаётся на сервере: `/opt/lumen/lumen-server.py passwd admin` (перезапуск не нужен). Пока пользователей нет, дашборд открыт без пароля и в шапке видно «без пароля»;
+- пароль задаётся на сервере: `/opt/luxmon/luxmon-server.py passwd admin` (перезапуск не нужен). Пока пользователей нет, дашборд открыт без пароля и в шапке видно «без пароля»;
 - сессия в cookie (HttpOnly, Secure, SameSite=Strict) на 14 дней; после 5 неудачных попыток адрес блокируется на 10 минут;
 - смена пароля завершает все сессии этого пользователя; вход с неизвестным именем занимает столько же времени, сколько с неверным паролем;
 - страницы отдаются с политикой безопасности (CSP) и одноразовым номером для скрипта: внедрённый в данные код не выполнится, даже если где-то пропущено экранирование. Поэтому в разметке нет обработчиков `onclick="…"`, используется `data-open`;
@@ -95,14 +100,14 @@
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
-  -subj /CN=lumen -addext subjectAltName=IP:192.168.3.7 \
-  -keyout /etc/lumen/server.key -out /etc/lumen/server.crt
+  -subj /CN=luxmon -addext subjectAltName=IP:192.168.3.7 \
+  -keyout /etc/luxmon/server.key -out /etc/luxmon/server.crt
 ```
 
 ## Отказоустойчивость
 
-- CT с сервером Lumen под HA (`ha-manager add ct:108`): при аварийном падении узла CT перезапускается на другом. При плановой перезагрузке узла политика HA по умолчанию (`conditional`) «замораживает» гостей на месте, и Lumen недоступен, пока узел не вернётся;
-- поэтому на другом узле (pve1) работает сторож `deploy/lumen-watchdog.py` (таймер раз в минуту): если `GET /api/health` не отвечает или данных от агентов нет дольше 3 минут, он пишет в Telegram, напоминает раз в 2 часа и сообщает о восстановлении. Lumen, в свою очередь, следит за pve1 — они страхуют друг друга.
+- CT с сервером Luxmon под HA (`ha-manager add ct:108`): при аварийном падении узла CT перезапускается на другом. При плановой перезагрузке узла политика HA по умолчанию (`conditional`) «замораживает» гостей на месте, и Luxmon недоступен, пока узел не вернётся;
+- поэтому на другом узле (pve1) работает сторож `deploy/luxmon-watchdog.py` (таймер раз в минуту): если `GET /api/health` не отвечает или данных от агентов нет дольше 3 минут, он пишет в Telegram, напоминает раз в 2 часа и сообщает о восстановлении. Luxmon, в свою очередь, следит за pve1 — они страхуют друг друга.
 
 ## Хранение
 
@@ -111,8 +116,20 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 ## Структура
 
 ```
-agent/lumen-agent.py        агент
-server/lumen-server.py      сервер: приём, SQLite, API, алерты, сводка, бот, вход
+agent/luxmon-agent.py        агент
+server/luxmon-server.py      запуск сервера и команда passwd
+server/luxmon/               ядро сервера:
+  config.py                   конфигурация и пороги
+  store.py                    SQLite и журнал событий
+  ingest.py                   приём данных от агентов
+  alerts.py                   движок алертов и обслуживание
+  analytics.py                свёртка истории, прогнозы, аномалии, доступность
+  settings.py                 действующие настройки и проверки сервисов
+  queries.py                  чтение данных для API
+  reports.py                  статус, утренняя сводка, итоги недели
+  bot.py, telegram.py         команды бота и Telegram API
+  auth.py                     пароли и сессии
+  httpd.py                    HTTP API и страницы
 server/web/index.html       дашборд
 server/web/login.html       страница входа
 server/tg-notify.py         отправка в Telegram
@@ -120,6 +137,7 @@ deploy/*.service            юниты systemd
 deploy/server.crt           сертификат сервера, который агенты используют для проверки HTTPS
 examples/                   примеры конфигов
 install.sh                  обновление кода на всех хостах кластера (агенты в VM — через qemu-guest-agent)
+tests/                      тесты: python3 -m unittest discover tests (нужен только Python)
 ```
 
 ## Установка
@@ -127,26 +145,26 @@ install.sh                  обновление кода на всех хост
 **Сервер** (в отдельном CT, а не на узле):
 
 ```bash
-mkdir -p /opt/lumen /etc/lumen && chmod 700 /etc/lumen
-cp -r server/lumen-server.py server/tg-notify.py server/web /opt/lumen/
-cp examples/server.json /etc/lumen/server.json            # задать token, tls_cert, tls_key
-cp examples/telegram.env.example /etc/lumen/telegram.env  # токен бота и chat id
-chmod 600 /etc/lumen/*
-cp deploy/lumen-server.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now lumen-server
-/opt/lumen/lumen-server.py passwd admin
+mkdir -p /opt/luxmon /etc/luxmon && chmod 700 /etc/luxmon
+cp -r server/luxmon-server.py server/luxmon server/tg-notify.py server/web /opt/luxmon/
+cp examples/server.json /etc/luxmon/server.json            # задать token, tls_cert, tls_key
+cp examples/telegram.env.example /etc/luxmon/telegram.env  # токен бота и chat id
+chmod 600 /etc/luxmon/*
+cp deploy/luxmon-server.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now luxmon-server
+/opt/luxmon/luxmon-server.py passwd admin
 ```
 
 **Агент** на каждом хосте:
 
 ```bash
-mkdir -p /opt/lumen /etc/lumen && chmod 700 /etc/lumen
-cp agent/lumen-agent.py /opt/lumen/
-cp deploy/server.crt /etc/lumen/server.crt
-cp examples/agent-pve-node.json /etc/lumen/agent.json     # server, token, host, modules, ca_file
-chmod 600 /etc/lumen/agent.json
-cp deploy/lumen-agent.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now lumen-agent
+mkdir -p /opt/luxmon /etc/luxmon && chmod 700 /etc/luxmon
+cp agent/luxmon-agent.py /opt/luxmon/
+cp deploy/server.crt /etc/luxmon/server.crt
+cp examples/agent-pve-node.json /etc/luxmon/agent.json     # server, token, host, modules, ca_file
+chmod 600 /etc/luxmon/agent.json
+cp deploy/luxmon-agent.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now luxmon-agent
 ```
 
 ## API
@@ -163,7 +181,7 @@ systemctl daemon-reload && systemctl enable --now lumen-agent
 - `GET`/`POST /api/settings` — настройки
 - `POST /api/silence`, `POST /api/silence/delete` — режим обслуживания
 
-Все запросы, кроме `/api/push` и `/api/login`, требуют входа; POST — ещё и заголовок `X-Lumen: 1`.
+Все запросы, кроме `/api/push` и `/api/login`, требуют входа; POST — ещё и заголовок `X-Luxmon: 1`.
 
 ## Заметки
 

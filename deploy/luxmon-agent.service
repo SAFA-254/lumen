@@ -1,9 +1,9 @@
 [Unit]
-Description=Lumen monitoring agent
+Description=Luxmon monitoring agent
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/lumen/lumen-agent.py
+ExecStart=/usr/bin/python3 /opt/luxmon/luxmon-agent.py
 Restart=always
 RestartSec=10
 Nice=10

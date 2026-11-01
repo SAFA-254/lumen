@@ -10,5 +10,5 @@
     "ssh"
   ],
   "backup_storage": "pbs",
-  "ca_file": "/etc/lumen/server.crt"
+  "ca_file": "/etc/luxmon/server.crt"
 }

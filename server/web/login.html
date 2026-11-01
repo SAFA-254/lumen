@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lumen — вход</title>
+<title>Omega Luxmon — вход</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='12' fill='%233ecf8e'/></svg>">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <style>
@@ -25,7 +25,7 @@ button:disabled{opacity:.6}
 </head>
 <body>
 <form id="f">
-  <div class="logo"><svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M17 2c1 6 8 9 8 17a9 9 0 0 1-18 0c0-4 2-7 4-9 .3 2.300 1 3.700 2.300 4.500C13 10 14 6 17 2z"/></svg>Lumen</div>
+  <div class="logo"><svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M17 2c1 6 8 9 8 17a9 9 0 0 1-18 0c0-4 2-7 4-9 .3 2.300 1 3.700 2.300 4.500C13 10 14 6 17 2z"/></svg>Luxmon</div>
   <p>Мониторинг кластера</p>
   <label for="u">Логин</label><input id="u" autocomplete="username" required autofocus>
   <label for="p">Пароль</label><input id="p" type="password" autocomplete="current-password" required>
@@ -38,7 +38,7 @@ document.getElementById("f").onsubmit = async ev => {
   const b = document.getElementById("b"), e = document.getElementById("e");
   b.disabled = true; e.textContent = "";
   try {
-    const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json", "X-Lumen": "1"},
+    const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json", "X-Luxmon": "1"},
       body: JSON.stringify({user: document.getElementById("u").value, password: document.getElementById("p").value})});
     if (r.ok) { location.href = "/"; return; }
     e.textContent = (await r.json()).error || "Ошибка входа";

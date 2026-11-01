@@ -1,5 +1,5 @@
 [Unit]
-Description=Run Lumen watchdog every minute
+Description=Run Luxmon watchdog every minute
 
 [Timer]
 OnBootSec=2min
