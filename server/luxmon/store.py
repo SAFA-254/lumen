@@ -20,6 +20,7 @@ class Store:
         CREATE TABLE IF NOT EXISTS hosts(name TEXT PRIMARY KEY, last_ts REAL, latest TEXT);
         CREATE TABLE IF NOT EXISTS raw(host TEXT, metric TEXT, ts INTEGER, v REAL);
         CREATE INDEX IF NOT EXISTS raw_idx ON raw(host, metric, ts);
+        CREATE INDEX IF NOT EXISTS raw_ts ON raw(ts);
         CREATE TABLE IF NOT EXISTS roll(host TEXT, metric TEXT, ts INTEGER, v REAL, vmax REAL,
                                         PRIMARY KEY(host, metric, ts)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS cluster(kind TEXT PRIMARY KEY, ts REAL, src TEXT, data TEXT);

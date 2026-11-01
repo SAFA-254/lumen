@@ -91,8 +91,11 @@ def day_strip(now):
     since = now - 86400
     alerts = [{"level": l, "msg": m, "start": a, "end": e} for l, m, a, e in S.q(
         "SELECT level, msg, start, end FROM alert_log WHERE muted=0 AND (end IS NULL OR end > ?)", (since,))]
+    # по хостам: так запрос идёт по индексу, а не просматривает всю таблицу raw под блокировкой базы
+    stamps = {t for (h,) in S.q("SELECT name FROM hosts") for (t,) in S.q(
+        "SELECT ts FROM raw WHERE host=? AND metric='cpu' AND ts > ?", (h, int(since)))}
     gaps, prev = [], since
-    for t in [r[0] for r in S.q("SELECT DISTINCT ts FROM raw WHERE metric='cpu' AND ts > ? ORDER BY ts", (int(since),))] + [now]:
+    for t in sorted(stamps) + [now]:
         if t - prev > 300:
             gaps.append([prev, t])
         prev = t

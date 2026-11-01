@@ -91,7 +91,7 @@ def anomalies(factor):
         return ANOMALY["items"]
     items = []
     names = ",".join(f"'{m}'" for m in ANOMALY_METRICS)
-    cur = {(h, m): v for h, m, v in S.q(f"SELECT host, metric, AVG(v) FROM raw WHERE ts > ? AND metric IN ({names}) "
+    cur = {(h, m): v for h, m, v in S.q(f"SELECT host, metric, AVG(v) FROM raw INDEXED BY raw_ts WHERE ts > ? AND metric IN ({names}) "
                                          f"AND host NOT LIKE '\\_%' ESCAPE '\\' GROUP BY host, metric", (now - 900,))}
     tz = time.localtime(now).tm_gmtoff
     hour = (now + tz) % 86400 // 3600
