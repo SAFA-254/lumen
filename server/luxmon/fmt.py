@@ -4,7 +4,7 @@ import re
 
 def scope_label(scope):
     return {"all": "весь кластер", "ceph": "Ceph", "patroni": "PostgreSQL/etcd", "checks": "проверки сервисов",
-            "backups": "бэкапы", "ssh": "входы по SSH"}.get(scope, scope.replace("host:", "хост "))
+            "backups": "бэкапы", "ssh": "входы по SSH"}.get(scope, scope.replace("host:", "хост ").replace("vm:", "VM "))
 
 
 def fmt_minutes(m):

@@ -2,6 +2,7 @@
 Общий токен из server.json ("token") пока тоже принимается, но не для хостов, у которых есть свой."""
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import sys
@@ -38,6 +39,44 @@ def any_tokens():
     return bool(CFG["token"]) or bool(S.q("SELECT 1 FROM agent_tokens LIMIT 1"))
 
 
+def issue_token(host, by="консоль"):
+    """Новый токен хоста (прежний перестаёт действовать). Показывается один раз."""
+    tok = "lxa_" + secrets.token_urlsafe(32)
+    S.q("INSERT OR REPLACE INTO agent_tokens VALUES(?,?,?)", (host, digest(tok), time.time()))
+    event("info", f"Выдан токен агента {host} ({by})")
+    return tok
+
+
+def revoke_token(host, by="консоль"):
+    S.q("DELETE FROM agent_tokens WHERE host=?", (host,))
+    event("info", f"Отозван токен агента {host} ({by})")
+
+
+def forget_host(host, by):
+    """Убрать хост из списка (выведен из работы). История графиков остаётся, токен отзывается."""
+    S.tx(lambda db: (db.execute("DELETE FROM hosts WHERE name=?", (host,)),
+                     db.execute("DELETE FROM agent_tokens WHERE host=?", (host,))))
+    event("info", f"Хост {host} убран из списка ({by})")
+
+
+def agents():
+    """Хосты с агентами: когда прислали данные, каким токеном, версия агента и модули."""
+    own = dict(S.q("SELECT host, created FROM agent_tokens"))
+    out = []
+    for name, last, latest in S.q("SELECT name, last_ts, latest FROM hosts ORDER BY name"):
+        d = json.loads(latest)
+        i = d.get("info") or {}
+        out.append({"name": name, "last": last, "auth": d.get("auth"), "token_since": own.pop(name, None),
+                    "version": i.get("agent"), "modules": i.get("modules"), "os": i.get("os"),
+                    "ips": (i.get("ips") or [])[:3], "interval": d.get("interval")})
+    # токен выдан, а данных с ним ещё не было
+    out += [{"name": h, "last": None, "auth": None, "token_since": t} for h, t in sorted(own.items())]
+    return out
+
+
+HOST_RE = re.compile(r"[\w.\-]{1,64}")
+
+
 def cmd_token(args):
     """token add ХОСТ — выдать (или заменить) токен, token del ХОСТ — отозвать, token list — кто с каким токеном."""
     if args[:1] == ["list"] and len(args) == 1:
@@ -48,18 +87,14 @@ def cmd_token(args):
                 else "общий токен"
             print(f"{h:24} {kind}")
         return
-    if len(args) != 2 or args[0] not in ("add", "del") or not re.fullmatch(r"[\w.\-]{1,64}", args[1]):
+    if len(args) != 2 or args[0] not in ("add", "del") or not HOST_RE.fullmatch(args[1]):
         sys.exit("использование: token add ХОСТ | token del ХОСТ | token list")
     action, host = args
     if action == "del":
-        S.q("DELETE FROM agent_tokens WHERE host=?", (host,))
-        event("info", f"Отозван токен агента {host}")
+        revoke_token(host)
         print(f"Токен {host} отозван." + (" Хост сможет присылать данные только с общим токеном."
                                           if CFG["token"] else ""))
         return
-    tok = "lxa_" + secrets.token_urlsafe(32)
-    S.q("INSERT OR REPLACE INTO agent_tokens VALUES(?,?,?)", (host, digest(tok), time.time()))
-    event("info", f"Выдан токен агента {host}")
-    print(tok)
+    print(issue_token(host))
     print(f"Впишите его в \"token\" в /etc/luxmon/agent.json на {host} и перезапустите агента. "
           f"Общий токен для {host} больше не действует.", file=sys.stderr)

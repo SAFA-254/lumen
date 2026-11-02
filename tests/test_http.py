@@ -130,7 +130,10 @@ class Open(Base):
         csp = h["Content-Security-Policy"]
         nonce = csp.split("'nonce-")[1].split("'")[0]
         self.assertNotIn(b"<script>", raw)
-        self.assertIn(f'<script nonce="{nonce}">'.encode(), raw)
+        self.assertIn(f'<script nonce="{nonce}" src="/app.js">'.encode(), raw)
+        code, h, js = self.req("GET", "/app.js")
+        self.assertEqual((code, h["Content-Type"].split(";")[0]), (200, "text/javascript"))
+        self.assertIn(b"function render(", js)
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotEqual(nonce, self.req("GET", "/")[1]["Content-Security-Policy"].split("'nonce-")[1].split("'")[0])
 
@@ -177,6 +180,17 @@ class HostTokens(Base):
         self.assertEqual(self.push({"host": "n1"}, token=tok)[0], 403)
         self.assertEqual(self.push({"host": "n1"})[0], 200)
 
+    def test_tokens_from_panel(self):
+        self.assertEqual(self.push({"host": "n5"})[0], 200)
+        tok = json.loads(self.api("POST", "/api/agents/token", {"host": "n5"})[2])["token"]
+        self.assertEqual(self.push({"host": "n5"}, token=tok)[0], 200)
+        a = {x["name"]: x for x in json.loads(self.api("GET", "/api/agents")[2])["agents"]}
+        self.assertEqual(a["n5"]["auth"], "host")
+        self.assertEqual(self.api("POST", "/api/agents/token", {"host": "../x"})[0], 400)
+        self.api("POST", "/api/agents/forget", {"host": "n5"})
+        self.assertNotIn("n5", [x["name"] for x in json.loads(self.api("GET", "/api/agents")[2])["agents"]])
+        self.assertEqual(self.push({"host": "n5"}, token=tok)[0], 403)
+
     def test_replaced_token_stops_working(self):
         old = self.cli("add", "n3").strip()
         new = self.cli("add", "n3").strip()
@@ -187,7 +201,8 @@ class HostTokens(Base):
 class Login(Base):
     @classmethod
     def prepare(cls):
-        return {"users": {"admin": hash_password("correct-horse", iters=1000)}}
+        return {"users": {"admin": hash_password("correct-horse", iters=1000),
+                          "guest": hash_password("guest-password", iters=1000)}, "roles": {"guest": "viewer"}}
 
     def login(self, user, pw):
         return self.api("POST", "/api/login", {"user": user, "password": pw})
@@ -214,6 +229,15 @@ class Login(Base):
         cfg["users"]["admin"] = hash_password("correct-horse", iters=1000)
         with open(self.config, "w") as f:
             json.dump(cfg, f)
+
+    def test_bb_viewer_can_look_but_not_change(self):
+        cookie = self.login("guest", "guest-password")[1]["Set-Cookie"].split(";")[0]
+        code, _, raw = self.api("GET", "/api/overview", cookie=cookie)
+        self.assertEqual((code, json.loads(raw)["role"]), (200, "viewer"))
+        self.assertEqual(self.api("POST", "/api/settings", {}, cookie=cookie)[0], 403)
+        self.assertEqual(self.api("POST", "/api/silence", {"scope": "all", "minutes": 5}, cookie=cookie)[0], 403)
+        admin = self.login("admin", "correct-horse")[1]["Set-Cookie"].split(";")[0]
+        self.assertEqual(json.loads(self.api("GET", "/api/overview", cookie=admin)[2])["role"], "admin")
 
     def test_c_logout(self):
         cookie = self.login("admin", "correct-horse")[1]["Set-Cookie"].split(";")[0]

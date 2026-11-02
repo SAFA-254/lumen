@@ -5,6 +5,8 @@
 Использование:
   luxmon-server.py               запустить сервер
   luxmon-server.py passwd USER   задать пароль для входа в веб-интерфейс
+  luxmon-server.py role USER admin|viewer
+                                 viewer — только просмотр, без настроек и обслуживания
   luxmon-server.py token add HOST | token del HOST | token list
                                  токены агентов: у каждого хоста свой"""
 import os
@@ -50,6 +52,9 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "passwd":
         from luxmon.passwd import cmd_passwd
         return cmd_passwd(sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == "role":
+        from luxmon.passwd import cmd_role
+        return cmd_role(sys.argv[2], sys.argv[3])
     if len(sys.argv) >= 2 and sys.argv[1] == "token":
         as_db_owner()
         from luxmon.tokens import cmd_token

@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+VERSION = "2026.11.02"  # видна в панели на странице агентов
 CONFIG_PATH = os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")
 CFG = {
     "server": "http://127.0.0.1:8095",
@@ -266,6 +267,8 @@ def info():
         pass
     return {
         "os": osname,
+        "agent": VERSION,
+        "modules": CFG["modules"],
         "kernel": platform.release(),
         "cpus": os.cpu_count(),
         "uptime": float(read("/proc/uptime").split()[0]),

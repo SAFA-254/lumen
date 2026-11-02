@@ -1,30 +1,56 @@
 """Вычисления по истории: свёртка данных, прогноз дисков, аномалии, доступность, возраст бэкапов."""
 import time
 
-from .config import CFG, ROLLUP_STEP
+from .config import CFG, HOURLY_STEP, ROLLUP_STEP
 from .store import S
 from .fmt import fmt_bytes
 
 
 def rollup_and_prune():
+    """Каждые 5 минут: сырые данные → средние за 5 минут и за час. Старое удаляется раз в час:
+    у roll и hourly нет индекса по времени, удаление просматривает таблицу целиком."""
     now = int(time.time())
     last = S.meta_get("rollup_ts", now - 3 * 86400)
     upto = now - now % ROLLUP_STEP  # только завершённые корзины
     keep = now - CFG["rollup_keep_days"] * 86400
+    if S.meta_get("hourly_ts") is None:
+        backfill_hourly()
+    hlast = S.meta_get("hourly_ts")
+    hupto = now - now % HOURLY_STEP
+    prune = now - S.meta_get("prune_ts", 0) >= 3600
 
     def w(db):
         db.execute(f"""INSERT OR REPLACE INTO roll
-            SELECT host, metric, ts - ts % {ROLLUP_STEP}, AVG(v), MAX(v) FROM raw
+            SELECT host, metric, ts - ts % {ROLLUP_STEP}, AVG(v), MAX(v) FROM raw INDEXED BY raw_ts
             WHERE ts >= ? AND ts < ? GROUP BY host, metric, ts - ts % {ROLLUP_STEP}""",
                    (last - last % ROLLUP_STEP, upto))
+        if hupto > hlast:
+            db.execute(f"""INSERT OR REPLACE INTO hourly
+                SELECT host, metric, ts - ts % {HOURLY_STEP}, AVG(v), MAX(v) FROM raw INDEXED BY raw_ts
+                WHERE ts >= ? AND ts < ? GROUP BY host, metric, ts - ts % {HOURLY_STEP}""", (hlast, hupto))
         db.execute("DELETE FROM raw WHERE ts < ?", (now - CFG["raw_keep_hours"] * 3600,))
-        db.execute("DELETE FROM roll WHERE ts < ?", (keep,))
-        db.execute("DELETE FROM events WHERE ts < ?", (keep,))
-        db.execute("DELETE FROM alert_log WHERE end IS NOT NULL AND end < ?", (keep,))
-        db.execute("DELETE FROM silence_log WHERE end IS NOT NULL AND end < ?", (keep,))
-        db.execute("DELETE FROM logins WHERE ts < ?", (keep,))
+        if prune:
+            db.execute("DELETE FROM roll WHERE ts < ?", (keep,))
+            db.execute("DELETE FROM hourly WHERE ts < ?", (now - CFG["hourly_keep_days"] * 86400,))
+            db.execute("DELETE FROM events WHERE ts < ?", (keep,))
+            db.execute("DELETE FROM alert_log WHERE end IS NOT NULL AND end < ?", (keep,))
+            db.execute("DELETE FROM silence_log WHERE end IS NOT NULL AND end < ?", (keep,))
+            db.execute("DELETE FROM logins WHERE ts < ?", (keep,))
     S.tx(w)
     S.meta_set("rollup_ts", upto)
+    S.meta_set("hourly_ts", max(hlast, hupto))
+    if prune:
+        S.meta_set("prune_ts", now)
+
+
+def backfill_hourly():
+    """Первый запуск с часовой историей: переносим всё, что уже накоплено в средних за 5 минут."""
+    now = int(time.time())
+    S.tx(lambda db: db.execute(f"""INSERT OR REPLACE INTO hourly
+        SELECT host, metric, ts - ts % {HOURLY_STEP}, AVG(v), MAX(vmax) FROM roll
+        WHERE ts < ? GROUP BY host, metric, ts - ts % {HOURLY_STEP}""", (now - CFG["raw_keep_hours"] * 3600,)))
+    # последние сутки-двое — из сырых данных, они точнее
+    S.meta_set("hourly_ts", now - CFG["raw_keep_hours"] * 3600 - now % HOURLY_STEP)
 
 
 def linear_trend(points):

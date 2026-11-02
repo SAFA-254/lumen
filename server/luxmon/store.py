@@ -23,6 +23,8 @@ class Store:
         CREATE INDEX IF NOT EXISTS raw_ts ON raw(ts);
         CREATE TABLE IF NOT EXISTS roll(host TEXT, metric TEXT, ts INTEGER, v REAL, vmax REAL,
                                         PRIMARY KEY(host, metric, ts)) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS hourly(host TEXT, metric TEXT, ts INTEGER, v REAL, vmax REAL,
+                                          PRIMARY KEY(host, metric, ts)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS cluster(kind TEXT PRIMARY KEY, ts REAL, src TEXT, data TEXT);
         CREATE TABLE IF NOT EXISTS events(ts REAL, level TEXT, msg TEXT);
         CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
@@ -34,6 +36,8 @@ class Store:
                                                start REAL, end REAL);
         CREATE TABLE IF NOT EXISTS logins(host TEXT, ts REAL, user TEXT, ip TEXT, method TEXT, known INTEGER);
         CREATE INDEX IF NOT EXISTS logins_ts ON logins(ts);
+        CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, ts REAL, scope TEXT, text TEXT, by TEXT);
+        CREATE INDEX IF NOT EXISTS notes_ts ON notes(ts);
         CREATE TABLE IF NOT EXISTS agent_tokens(host TEXT PRIMARY KEY, hash TEXT UNIQUE, created REAL);
         """)
         for ext in ("", "-wal", "-shm"):

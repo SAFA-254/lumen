@@ -1,9 +1,10 @@
 """Чтение данных для API: ряды, сессии SSH, сводное состояние, история алертов."""
 import json
+import re
 import time
 
-from .config import CFG, ROLLUP_STEP
-from .store import S
+from .config import CFG, HOURLY_STEP, ROLLUP_STEP
+from .store import S, event
 from .fmt import scope_label
 from .analytics import forecasts
 from .settings import backup_age, rules
@@ -14,9 +15,14 @@ from .ingest import METHODS, addr_names
 def series(host, metric, start, end, points=240):
     span = max(1, end - start)
     step = max(15, span // points)
-    table = "raw" if start >= time.time() - CFG["raw_keep_hours"] * 3600 + 600 else "roll"
-    if table == "roll":
-        step = max(step, ROLLUP_STEP)
+    now = time.time()
+    # самая подробная таблица, в которой ещё есть начало периода
+    if start >= now - CFG["raw_keep_hours"] * 3600 + 600:
+        table = "raw"
+    elif start >= now - CFG["rollup_keep_days"] * 86400 + 600:
+        table, step = "roll", max(step, ROLLUP_STEP)
+    else:
+        table, step = "hourly", max(step, HOURLY_STEP)
     rows = S.q(f"""SELECT ts - ts % {step} AS b, AVG(v) FROM {table}
                    WHERE host=? AND metric=? AND ts>=? AND ts<=? GROUP BY b ORDER BY b""",
                (host, metric, start, end))
@@ -83,7 +89,31 @@ def annotations(scope, start, end):
         if sc == "all" or sc == scope:
             out.append({"kind": "maint", "msg": "Обслуживание: " + scope_label(sc) + (f" — {reason}" if reason else ""),
                         "start": s, "end": e})
+    for nid, ts, sc, text, by in S.q("SELECT id, ts, scope, text, by FROM notes WHERE ts >= ? AND ts <= ? "
+                                     "AND (scope = ? OR scope = 'all') ORDER BY ts", (start, end, scope)):
+        out.append({"kind": "note", "id": nid, "msg": text, "by": by, "start": ts, "end": ts, "all": sc == "all"})
     return out
+
+
+NOTE_SCOPE = re.compile(r"all|ceph|patroni|checks|host:[\w.\-]{1,64}|vm:\d{1,9}")
+
+
+def add_note(body, by):
+    """Заметка на графиках: «обновил ядро», «перенёс VM» — потом видно, отчего изменилась нагрузка."""
+    scope, text = str(body.get("scope", "")), str(body.get("text", "")).strip()[:300]
+    ts = float(body.get("ts") or time.time())
+    if not NOTE_SCOPE.fullmatch(scope):
+        raise ValueError("неверная область заметки")
+    if not text:
+        raise ValueError("пустая заметка")
+    if abs(ts - time.time()) > 400 * 86400:
+        raise ValueError("время заметки вне хранимой истории")
+    S.q("INSERT INTO notes(ts, scope, text, by) VALUES(?,?,?,?)", (ts, scope, text, by))
+    event("info", f"Заметка ({scope_label(scope) if scope != 'all' else 'все графики'}): {text}")
+
+
+def delete_note(nid):
+    S.q("DELETE FROM notes WHERE id=?", (int(nid),))
 
 
 def day_strip(now):

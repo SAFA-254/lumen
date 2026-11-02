@@ -19,7 +19,8 @@ DEFAULTS = {
     "web": os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web"),
     "notify_cmd": "",
     "raw_keep_hours": 48,
-    "rollup_keep_days": 30,
+    "rollup_keep_days": 30,       # средние за 5 минут
+    "hourly_keep_days": 365,      # средние и максимумы за час — для графиков за месяцы и год
     "rules": {},
 }
 
@@ -79,6 +80,7 @@ SMART_NAMES = {"realloc": "переназначенных секторов", "pe
                "uncorrectable": "нечитаемых секторов", "reported_uncorrect": "неисправленных ошибок",
                "crc": "ошибок CRC (кабель SATA)"}
 ROLLUP_STEP = 300
+HOURLY_STEP = 3600
 SERIES_MIN_GAP = 20  # кластерные ряды присылают несколько агентов — пишем не чаще раза в 20 с
 SILENCE_SCOPES = ("all", "ceph", "patroni", "checks", "backups", "ssh")
 LOGIN_LIMIT = (5, 600)  # неудачных попыток за столько секунд с одного адреса

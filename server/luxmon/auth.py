@@ -69,10 +69,19 @@ class Sessions:
 SESSIONS = Sessions()
 
 
-def users():
-    # пароль меняется командой passwd без перезапуска сервера
+def file_config():
+    # пароли и роли меняются командами passwd и role без перезапуска сервера
     try:
         with open(CONFIG_PATH) as f:
-            return json.load(f).get("users") or {}
+            return json.load(f)
     except (OSError, ValueError):
-        return CFG.get("users") or {}
+        return CFG
+
+
+def users():
+    return file_config().get("users") or {}
+
+
+def role(user):
+    """admin или viewer. Пока пользователей нет, панель открыта и всё разрешено."""
+    return (file_config().get("roles") or {}).get(user, "admin")

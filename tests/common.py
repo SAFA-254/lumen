@@ -25,7 +25,7 @@ START = 1793000000.0  # среда, 12:00 по UTC
 
 def reset():
     """Чистая база и состояние алертов перед каждым тестом. Возвращает список отправленных уведомлений."""
-    for table in ("hosts", "raw", "roll", "cluster", "events", "meta", "alert_log", "silence_log", "logins"):
+    for table in ("hosts", "raw", "roll", "cluster", "events", "meta", "alert_log", "silence_log", "logins", "notes", "hourly"):
         S.q(f"DELETE FROM {table}")
     ALERTS.active, ALERTS.pending, ALERTS.clearing, ALERTS.silences = {}, {}, {}, []
     ingest_mod.SERIES_LAST.clear()

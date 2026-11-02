@@ -14,9 +14,9 @@ from .analytics import uptime
 from .settings import save_settings, settings_payload
 from .alerts import ALERTS
 from .ingest import ingest
-from .tokens import has_own_token, push_identity
-from .queries import alert_history, annotations, overview, series, ssh_fails, ssh_sessions
-from .auth import DUMMY_HASH, SESSIONS, check_password, users
+from .tokens import HOST_RE, agents, forget_host, has_own_token, issue_token, push_identity, revoke_token
+from .queries import add_note, alert_history, annotations, delete_note, overview, series, ssh_fails, ssh_sessions
+from .auth import DUMMY_HASH, SESSIONS, check_password, role, users
 
 
 def parse_cookie(header):
@@ -91,11 +91,19 @@ class Handler(BaseHTTPRequestHandler):
         # обработчики onclick="…" не выполнятся, даже если где-то пропущено экранирование
         nonce = secrets.token_urlsafe(16)
         with open(os.path.join(CFG["web"], name), "rb") as f:
-            page = f.read().replace(b"<script>", f'<script nonce="{nonce}">'.encode())
+            page = f.read().replace(b"<script", f'<script nonce="{nonce}"'.encode())
         csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                "font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; "
                "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         return self.send(200, page, "text/html; charset=utf-8", csp=csp)
+
+    ASSETS = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8",
+              "i18n.js": "text/javascript; charset=utf-8"}
+
+    def asset(self, name):
+        # код и стили панели без входа: в них нет данных, а страница входа тоже ими пользуется
+        with open(os.path.join(CFG["web"], name), "rb") as f:
+            return self.send(200, f.read(), self.ASSETS[name])
 
     # ---- POST
     def do_POST(self):
@@ -116,6 +124,8 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require_user()
             if not user:
                 return
+            if role(user) != "admin":
+                return self.send(403, {"error": "у вас доступ только для просмотра"})
             if self.path == "/api/silence":
                 scope = str(body.get("scope", ""))
                 hosts = {r[0] for r in S.q("SELECT name FROM hosts")}
@@ -128,6 +138,24 @@ class Handler(BaseHTTPRequestHandler):
                                                          f"{user}@{self.client_ip()}"))
             if self.path == "/api/silence/delete":
                 return self.send(200, {"ok": ALERTS.remove_silence(str(body.get("id")))})
+            if self.path == "/api/notes":
+                add_note(body, user)
+                return self.send(200, {"ok": True})
+            if self.path == "/api/notes/delete":
+                delete_note(body.get("id"))
+                return self.send(200, {"ok": True})
+            if self.path.startswith("/api/agents/"):
+                host, who = str(body.get("host", "")), f"{user} через панель"
+                if not HOST_RE.fullmatch(host):
+                    return self.send(400, {"error": "неверное имя хоста"})
+                if self.path == "/api/agents/token":
+                    return self.send(200, {"token": issue_token(host, who)})
+                if self.path == "/api/agents/revoke":
+                    revoke_token(host, who)
+                    return self.send(200, {"ok": True})
+                if self.path == "/api/agents/forget":
+                    forget_host(host, who)
+                    return self.send(200, {"ok": True})
             if self.path == "/api/settings":
                 save_settings(body)
                 return self.send(200, settings_payload())
@@ -185,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/login":
                 return self.static("login.html")
+            if u.path[1:] in self.ASSETS:
+                return self.asset(u.path[1:])
             if u.path in ("/", "/index.html"):
                 if self.require_user(api=False):
                     return self.static("index.html")
@@ -200,10 +230,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             now = int(time.time())
             if u.path == "/api/overview":
-                return self.send(200, dict(overview(), user=user, auth=bool(users())))
+                return self.send(200, dict(overview(), user=user, auth=bool(users()), role=role(user)))
             if u.path == "/api/history":
                 end = int(qs.get("end", now))
-                start = int(qs.get("start", end - min(int(qs.get("range", 3600)), CFG["rollup_keep_days"] * 86400)))
+                start = int(qs.get("start", end - min(int(qs.get("range", 3600)), CFG["hourly_keep_days"] * 86400)))
                 metrics = qs.get("metrics", "cpu").split(",")[:30]
                 out = {m: series(qs["host"], m, start, end) for m in metrics}
                 if qs.get("scope"):
@@ -222,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, alert_history(min(int(qs.get("days", 7)), CFG["rollup_keep_days"])))
             if u.path == "/api/settings":
                 return self.send(200, settings_payload())
+            if u.path == "/api/agents":
+                return self.send(200, {"agents": agents(), "shared_token": bool(CFG["token"])})
         except Exception as e:
             return self.send(500, {"error": repr(e)})
         self.send(404, {"error": "not found"})
