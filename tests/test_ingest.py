@@ -66,6 +66,13 @@ class Ingest(unittest.TestCase):
         self.assertEqual(r1["checks"][0]["name"], "w")
         self.assertEqual(r2["checks"], [])
 
+    def test_checks_runner_chosen_when_empty(self):
+        with Clock() as c:
+            save_settings({"checks": [{"name": "w", "type": "ping", "host": "1.1.1.1"}], "checks_runner": ""})
+            r1 = ingest(payload("n2", c.now))
+            r2 = ingest(payload("n1", c.now))
+        self.assertEqual((len(r1["checks"]), r2["checks"]), (1, []))
+
     def test_clock_skew_is_median(self):
         with Clock() as c:
             for s in (0.1, 0.1, 50, 0.1, 0.1):

@@ -129,7 +129,13 @@ def memory():
 
 def disks():
     out, seen = [], set()
-    for line in read("/proc/mounts").splitlines():
+    # монтирования глазами системы, а не агента: systemd (ProtectSystem) показывает агенту /boot и /usr
+    # только для чтения, и по /proc/mounts они выглядели бы как отказ диска
+    try:
+        mounts = read("/proc/1/mounts")
+    except OSError:
+        mounts = read("/proc/mounts")
+    for line in mounts.splitlines():
         dev, mnt, fs, opts = line.split()[:4]
         if fs not in REAL_FS or dev in seen or mnt.startswith(("/var/lib/docker", "/snap")):
             continue

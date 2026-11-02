@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Сторож Luxmon: запускается таймером раз в минуту на узле, где Luxmon НЕ живёт (pve1).
+"""Сторож Luxmon: запускается таймером раз в минуту на другой машине, не там, где живёт сервер Luxmon.
 Если сервер не отвечает или перестал получать данные от агентов дольше DOWN_AFTER секунд,
 пишет в Telegram; напоминает раз в REMIND секунд; сообщает, когда Luxmon снова работает.
 
-Luxmon со своей стороны следит за pve1 (агент на pve1), так что они страхуют друг друга."""
+Luxmon со своей стороны следит за этой машиной (на ней стоит агент), так что они страхуют друг друга.
+Адрес сервера берётся из LUXMON_HEALTH_URL, иначе из конфигурации агента на этой машине."""
 import json
 import os
 import ssl
@@ -12,7 +13,15 @@ import sys
 import time
 import urllib.request
 
-URL = os.environ.get("LUXMON_HEALTH_URL", "https://192.168.3.7/api/health")
+
+def health_url():
+    if os.environ.get("LUXMON_HEALTH_URL"):
+        return os.environ["LUXMON_HEALTH_URL"]
+    with open(os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")) as f:
+        return json.load(f)["server"].rstrip("/") + "/api/health"
+
+
+URL = health_url()
 CA = os.environ.get("LUXMON_CA", "/etc/luxmon/server.crt")
 NOTIFY = os.environ.get("LUXMON_NOTIFY", "/root/tg-notify.sh")
 STATE = "/var/lib/luxmon-watchdog/state.json"

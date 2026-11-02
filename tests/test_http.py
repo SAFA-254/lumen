@@ -156,6 +156,34 @@ class Open(Base):
         self.assertEqual(self.api("GET", "/api/nope")[0], 404)
 
 
+class HostTokens(Base):
+    """У хоста свой токен: им нельзя прислать данные за другой хост, а общий токен для этого хоста не действует."""
+
+    @classmethod
+    def cli(cls, *args):
+        env = dict(os.environ, LUXMON_CONFIG=cls.config, LUXMON_TG_ENV=os.path.join(cls.tmp, "tg"))
+        return subprocess.run([sys.executable, os.path.join(SERVER, "luxmon-server.py"), "token", *args],
+                              env=env, capture_output=True, text=True, check=True).stdout
+
+    def test_own_token(self):
+        tok = self.cli("add", "n1").strip()
+        self.assertTrue(tok.startswith("lxa_"))
+        self.assertEqual(self.push({"host": "n1"}, token=tok)[0], 200)
+        self.assertEqual(self.push({"host": "n2"}, token=tok)[0], 403)
+        self.assertEqual(self.push({"host": "n1"})[0], 403)  # общий токен
+        self.assertEqual(self.push({"host": "n2"})[0], 200)
+        self.assertIn("свой токен", self.cli("list"))
+        self.cli("del", "n1")
+        self.assertEqual(self.push({"host": "n1"}, token=tok)[0], 403)
+        self.assertEqual(self.push({"host": "n1"})[0], 200)
+
+    def test_replaced_token_stops_working(self):
+        old = self.cli("add", "n3").strip()
+        new = self.cli("add", "n3").strip()
+        self.assertEqual(self.push({"host": "n3"}, token=old)[0], 403)
+        self.assertEqual(self.push({"host": "n3"}, token=new)[0], 200)
+
+
 class Login(Base):
     @classmethod
     def prepare(cls):

@@ -137,8 +137,10 @@ def uptime(days):
     return res
 
 
-def backup_work_age(last, now):
-    # задание бэкапов идёт только по будням, поэтому субботу и воскресенье в возраст не считаем
+def backup_work_age(last, now, weekdays_only=True):
+    """Возраст бэкапа. Если задание идёт только по будням, субботу и воскресенье в возраст не считаем."""
+    if not weekdays_only:
+        return max(0, now - last)
     age, t = 0, last
     while t < now:
         d = time.localtime(t)

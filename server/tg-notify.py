@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Отправка алерта в Telegram. Использование: tg-notify.py "текст".
-Токен и чат берутся из /etc/luxmon/telegram.env (TELEGRAM_TOKEN=..., TELEGRAM_CHAT=...).
+Токен и чат берутся из /etc/luxmon/telegram.env (TELEGRAM_TOKEN=..., TELEGRAM_CHAT=...,
+необязательно TELEGRAM_X509_STRICT=0 — см. ниже).
 С 23:00 до 08:00 сообщения приходят без звука; TG_SILENT=1/0 переопределяет."""
 import os
 import ssl
@@ -20,11 +21,12 @@ hour = time.localtime().tm_hour
 silent = os.environ.get("TG_SILENT")
 silent = silent == "1" if silent is not None else (hour >= 23 or hour < 8)
 
-# Шлюз USIAG подменяет сертификат; его корень установлен в системе, но в нём нет
-# Authority Key Identifier, а Python 3.13 по умолчанию требует его (VERIFY_X509_STRICT).
+# TELEGRAM_X509_STRICT=0 — для прокси, подменяющих сертификат: их корень бывает без Authority Key
+# Identifier, а Python 3.13 по умолчанию требует его (VERIFY_X509_STRICT).
 # Цепочка и имя хоста по-прежнему проверяются.
 ctx = ssl.create_default_context()
-ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+if env.get("TELEGRAM_X509_STRICT") == "0":
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
 data = urllib.parse.urlencode({"chat_id": env["TELEGRAM_CHAT"], "text": sys.argv[1],
                                "disable_notification": "true" if silent else "false"}).encode()

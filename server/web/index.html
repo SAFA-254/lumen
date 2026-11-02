@@ -1475,9 +1475,12 @@ function renderSettings(msg, isErr) {
       <div class="unit"><input id="r-${r.key}" data-rule="${r.key}" type="number" step="any" min="${r.min}" max="${r.max}" value="${r.value}" title="по умолчанию ${r.default}"><span>${esc(r.unit)}</span></div></div>`).join("")}</div>
 
     <div class="sect">Проверки сервисов</div>
-    <div class="field" style="max-width:320px"><label>Откуда проверять</label><select id="runner">${s.hosts.map(h => `<option ${h == s.settings.checks_runner ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></div>
+    <div class="field" style="max-width:320px"><label>Откуда проверять</label><select id="runner">${s.settings.checks_runner ? "" : `<option value="" selected>первый хост, приславший данные</option>`}${s.hosts.map(h => `<option ${h == s.settings.checks_runner ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></div>
     <div class="panel tbl"><table class="ctable" id="checks-t"><tr><th>Имя</th><th>Тип</th><th>Адрес</th><th></th><th>Ожидаемый текст</th><th></th></tr>${s.checks.map(checkRow).join("")}</table>
       <div style="padding:8px 10px"><button id="add-check">+ Добавить проверку</button></div></div>
+
+    <div class="sect">Бэкапы</div>
+    <label class="muted" style="font-size:13px;display:flex;gap:8px;align-items:center"><input type="checkbox" id="bk-weekdays" ${s.settings.backup_weekdays_only ? "checked" : ""}> Бэкапы делаются только по будням: субботу и воскресенье не считать в возраст бэкапа</label>
 
     <div class="sect">Утренняя сводка в Telegram</div>
     <div class="field" style="max-width:320px"><label for="sumtime">Время отправки (ЧЧ:ММ, пусто — не отправлять)</label><input id="sumtime" value="${esc(s.settings.summary_time)}" placeholder="09:00"></div>
@@ -1488,7 +1491,7 @@ function renderSettings(msg, isErr) {
     <textarea id="known">${esc(s.settings.ssh_known.join("\n"))}</textarea>
 
     <div class="sect">Команды в Telegram</div>
-    <div class="muted" style="font-size:12.5px">${s.bot ? "✅ Бот команд подключён: /status, /alerts, /mute, /unmute, /summary." : "Не настроены. Нужен отдельный бот (основной бот уже занят alertmanager-bot): создай его у @BotFather и добавь <code>LUXMON_BOT_TOKEN=…</code> в /etc/luxmon/telegram.env на сервере Luxmon."}</div>
+    <div class="muted" style="font-size:12.5px">${s.bot ? "✅ Бот команд подключён: /status, /alerts, /mute, /unmute, /summary." : "Не настроены. Нужен отдельный бот (основной может опрашивать другая программа, тогда команды до Luxmon не дойдут): создай его у @BotFather и добавь <code>LUXMON_BOT_TOKEN=…</code> в /etc/luxmon/telegram.env на сервере Luxmon."}</div>
 
     <div class="row-end" style="margin-top:24px;position:sticky;bottom:0;background:var(--bg);padding:12px 0">
       <span class="${isErr ? "err-box" : "ok-box"}">${esc(msg || "")}</span>
@@ -1501,7 +1504,7 @@ function renderSettings(msg, isErr) {
     const body = {
       rules: Object.fromEntries([...document.querySelectorAll("[data-rule]")].map(i => [i.dataset.rule, +i.value])),
       checks: readChecks(), checks_runner: $("#runner").value,
-      summary_time: $("#sumtime").value.trim(), weekly_report: $("#weekly").checked, ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
+      summary_time: $("#sumtime").value.trim(), weekly_report: $("#weekly").checked, backup_weekdays_only: $("#bk-weekdays").checked, ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
     };
     try { SET = await api("api/settings", body); renderSettings("Сохранено"); refresh(); }
     catch (e) { s.checks = body.checks; renderSettings(e.message, true); }

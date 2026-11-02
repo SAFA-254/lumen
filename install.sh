@@ -5,8 +5,7 @@
 # не трогаются — обновляются код, юниты и сертификат сервера; агенту в VM конфиг создаётся только при первой установке.
 set -euo pipefail
 cd "$(dirname "$0")"
-SERVER=https://192.168.3.7
-TOKEN=$(python3 -c 'import json;print(json.load(open("/etc/luxmon/agent.json"))["token"])')
+SERVER=$(python3 -c 'import json;print(json.load(open("/etc/luxmon/agent.json"))["server"])')
 # VM: vmid -> модули агента
 declare -A VM_MODULES=([104]='["system","ssh","logs","procs","updates"]' [105]='["system","ssh","logs","procs","updates","postgres"]' [106]='["system","ssh","logs","procs","updates","postgres"]')
 
@@ -24,7 +23,8 @@ push_ct() { # ct файл-на-узле путь-в-ct [права]
 ct_begin() { # ct: выбрать узел контейнера и положить на него файлы
   CT_NODE=root@$(ip_of_node "$(node_of $1)")
   tmp=$(ssh $CT_NODE mktemp -d)
-  scp -q agent/luxmon-agent.py deploy/luxmon-server.service deploy/luxmon-agent.service deploy/server.crt $CT_NODE:$tmp/
+  scp -q agent/luxmon-agent.py deploy/luxmon-server.service deploy/luxmon-agent.service deploy/luxmon-server-setup.sh \
+    deploy/server.crt $CT_NODE:$tmp/
 }
 
 echo "== CT 108: сервер + агент"
@@ -35,8 +35,11 @@ push_ct 108 $tmp/luxmon-agent.py /opt/luxmon/luxmon-agent.py
 push_ct 108 $tmp/luxmon-server.service /etc/systemd/system/luxmon-server.service
 push_ct 108 $tmp/luxmon-agent.service /etc/systemd/system/luxmon-agent.service
 push_ct 108 $tmp/server.crt /etc/luxmon/server.crt 644
+push_ct 108 $tmp/luxmon-server-setup.sh /opt/luxmon/luxmon-server-setup.sh 755
+# сервер работает от пользователя luxmon: setup создаёт его и отдаёт ему базу и конфиг сервера
 ssh $CT_NODE "pct exec 108 -- sh -c 'tar -C /opt/luxmon -xzf /tmp/app.tgz && rm /tmp/app.tgz && chmod 755 /opt/luxmon/tg-notify.py /opt/luxmon/luxmon-server.py \
-  && systemctl daemon-reload && systemctl restart luxmon-server luxmon-agent'; rm -rf $tmp"
+  && /opt/luxmon/luxmon-server-setup.sh && systemctl daemon-reload && systemctl restart luxmon-server luxmon-agent'; rm -rf $tmp"
+SERVER_NODE=$CT_NODE
 
 echo "== CT 101 etcd-arbiter: агент"
 ct_begin 101
@@ -76,11 +79,15 @@ for vmid in "${!VM_MODULES[@]}"; do
   guest $node $vmid 'cat > /opt/luxmon/luxmon-agent.py' agent/luxmon-agent.py
   guest $node $vmid 'cat > /etc/luxmon/server.crt' deploy/server.crt
   guest $node $vmid 'cat > /etc/systemd/system/luxmon-agent.service' deploy/luxmon-agent.service
-  cfg=$(mktemp)
-  echo "{\"server\":\"$SERVER\",\"token\":\"$TOKEN\",\"host\":\"\",\"modules\":${VM_MODULES[$vmid]},\"ca_file\":\"/etc/luxmon/server.crt\"}" > "$cfg"
-  # host берётся из hostname гостя; конфиг пишется только если его ещё нет
-  guest $node $vmid 'test -f /etc/luxmon/agent.json || { umask 077; python3 -c "import json,sys,socket;c=json.load(sys.stdin);c[\"host\"]=socket.gethostname();json.dump(c,open(\"/etc/luxmon/agent.json\",\"w\"))"; }' "$cfg"
-  rm -f "$cfg"
+  # конфиг пишется только при первой установке: имя хоста — hostname гостя, токен — свой для этого хоста
+  if ! guest $node $vmid 'test -f /etc/luxmon/agent.json'; then
+    host=$(guest $node $vmid hostname | tr -d '[:space:]')
+    token=$(ssh $SERVER_NODE "pct exec 108 -- /opt/luxmon/luxmon-server.py token add $host")
+    cfg=$(mktemp)
+    echo "{\"server\":\"$SERVER\",\"token\":\"$token\",\"host\":\"$host\",\"modules\":${VM_MODULES[$vmid]},\"ca_file\":\"/etc/luxmon/server.crt\"}" > "$cfg"
+    guest $node $vmid 'umask 077; cat > /etc/luxmon/agent.json' "$cfg"
+    rm -f "$cfg"
+  fi
   guest $node $vmid 'systemctl daemon-reload && systemctl enable --quiet luxmon-agent && systemctl restart luxmon-agent && systemctl is-active luxmon-agent'
 done
 

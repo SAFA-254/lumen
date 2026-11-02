@@ -5,7 +5,7 @@ import re
 from .config import CFG, DEFAULT_SETTINGS, RULES_META
 from .store import S, event
 from .telegram import tg_env
-from .analytics import FORECAST
+from .analytics import FORECAST, backup_work_age
 
 
 def rules():
@@ -20,6 +20,10 @@ def settings():
     s = dict(DEFAULT_SETTINGS)
     s.update(S.meta_get("settings", {}))
     return s
+
+
+def backup_age(last, now):
+    return backup_work_age(last, now, settings()["backup_weekdays_only"])
 
 
 def checks_list():
@@ -84,6 +88,8 @@ def save_settings(body):
         st["summary_time"] = t
     if "weekly_report" in body:
         st["weekly_report"] = bool(body["weekly_report"])
+    if "backup_weekdays_only" in body:
+        st["backup_weekdays_only"] = bool(body["backup_weekdays_only"])
     if "checks_runner" in body:
         st["checks_runner"] = str(body["checks_runner"])[:64]
     if "ssh_known" in body:

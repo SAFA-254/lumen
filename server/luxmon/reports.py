@@ -5,8 +5,8 @@ import time
 from .config import ROLLUP_STEP
 from .store import S
 from .fmt import fmt_bytes, fmt_dur
-from .analytics import backup_work_age, forecasts, uptime
-from .settings import rules, settings
+from .analytics import forecasts, uptime
+from .settings import backup_age, rules, settings
 from .alerts import ALERTS
 from .queries import alert_history, overview
 
@@ -67,7 +67,7 @@ def morning_summary():
     if bk:
         tasks = [t for t in bk.get("tasks", []) if t["starttime"] > day]
         bad = [t for t in tasks if t.get("status") not in (None, "OK")]
-        stale = [g for g in bk.get("guests", []) if backup_work_age(g["last"], now) > rules()["backup_max_age_h"] * 3600]
+        stale = [g for g in bk.get("guests", []) if backup_age(g["last"], now) > rules()["backup_max_age_h"] * 3600]
         out.append(f"Бэкапы: заданий {len(tasks)}, с ошибкой {len(bad)}; "
                    + (f"устарели: {', '.join(str(g['vmid']) for g in stale)}" if stale else "все гости свежие"))
     peaks = S.q("SELECT host, metric, MAX(v) FROM raw WHERE ts > ? AND metric IN ('cpu','mem') "

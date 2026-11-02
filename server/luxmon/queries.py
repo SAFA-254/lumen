@@ -5,8 +5,8 @@ import time
 from .config import CFG, ROLLUP_STEP
 from .store import S
 from .fmt import scope_label
-from .analytics import backup_work_age, forecasts
-from .settings import rules
+from .analytics import forecasts
+from .settings import backup_age, rules
 from .alerts import ALERTS, Alerts
 from .ingest import METHODS, addr_names
 
@@ -57,7 +57,7 @@ def overview():
         data = json.loads(d)
         cluster[k] = dict(data if isinstance(data, dict) else {"items": data}, _age=now - ts, _src=src)
     for g in cluster.get("backups", {}).get("guests", []):
-        g["work_age"] = backup_work_age(g["last"], now)
+        g["work_age"] = backup_age(g["last"], now)
         g["stale"] = g["work_age"] > rules()["backup_max_age_h"] * 3600
     events = [{"ts": t, "level": l, "msg": m}
               for t, l, m in S.q("SELECT ts, level, msg FROM events ORDER BY ts DESC LIMIT 40")]

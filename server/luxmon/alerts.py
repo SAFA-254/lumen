@@ -8,8 +8,8 @@ import time
 from .config import CFG, SMART_NAMES
 from .store import S, event
 from .fmt import fmt_bytes, fmt_dur, fmt_minutes, scope_label
-from .analytics import anomalies, backup_work_age, forecasts
-from .settings import rules
+from .analytics import anomalies, forecasts
+from .settings import backup_age, rules
 
 
 class Alerts:
@@ -326,7 +326,7 @@ class Alerts:
             S.meta_set("bk_failed_seen", sorted(seen)[-200:])
             max_age = r["backup_max_age_h"] * 3600
             for g in bk.get("guests", []):
-                if g.get("last") and backup_work_age(g["last"], now) > max_age:
+                if g.get("last") and backup_age(g["last"], now) > max_age:
                     found[f"bk:{g['vmid']}"] = ("warn", f"Бэкап {g['vmid']} {g.get('name', '')}: "
                                                         f"последний {int((now - g['last']) / 3600)} ч назад", 0)
 

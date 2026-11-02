@@ -21,9 +21,11 @@ def tg_env():
 
 
 def tg_ctx():
-    # корень USIAG установлен в системе, но в нём нет Authority Key Identifier (см. tg-notify.py)
+    # TELEGRAM_X509_STRICT=0 — для прокси, подменяющих сертификат: их корень бывает без Authority Key
+    # Identifier, а Python 3.13 по умолчанию требует его. Цепочка и имя хоста проверяются всё равно.
     ctx = ssl.create_default_context()
-    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    if tg_env().get("TELEGRAM_X509_STRICT") == "0":
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
     return ctx
 
 

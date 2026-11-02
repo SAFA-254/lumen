@@ -34,6 +34,7 @@ class Store:
                                                start REAL, end REAL);
         CREATE TABLE IF NOT EXISTS logins(host TEXT, ts REAL, user TEXT, ip TEXT, method TEXT, known INTEGER);
         CREATE INDEX IF NOT EXISTS logins_ts ON logins(ts);
+        CREATE TABLE IF NOT EXISTS agent_tokens(host TEXT PRIMARY KEY, hash TEXT UNIQUE, created REAL);
         """)
         for ext in ("", "-wal", "-shm"):
             if os.path.exists(path + ext):

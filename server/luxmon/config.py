@@ -9,10 +9,10 @@ DEFAULTS = {
     "listen": "0.0.0.0",
     "port": 8095,
     "redirect_port": 0,       # если задан — HTTP на этом порту перенаправляет на HTTPS
-    "public_url": "",          # адрес для ссылок и перенаправления, например https://192.168.3.7
+    "public_url": "",          # адрес для ссылок и перенаправления, например https://luxmon.example.lan
     "tls_cert": "",
     "tls_key": "",
-    "token": "",
+    "token": "",              # общий токен агентов; лучше выдавать свой каждому хосту: luxmon-server.py token add
     "users": {},               # user -> pbkdf2 hash, задаётся командой passwd
     "session_days": 14,
     "db": "/var/lib/luxmon/luxmon.db",
@@ -69,8 +69,9 @@ RULES_META = {
 DEFAULT_SETTINGS = {
     "summary_time": "09:00",
     "weekly_report": True,
-    "checks_runner": "pve1",
+    "checks_runner": "",          # пусто — проверки выполняет первый хост, приславший данные
     "ssh_known": [],
+    "backup_weekdays_only": False,  # бэкапы идут только по будням: выходные в возраст бэкапа не считаются
 }
 
 # счётчики SMART, рост которых сообщается сразу

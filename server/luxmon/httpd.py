@@ -1,5 +1,4 @@
 """HTTP API и выдача страниц."""
-import hmac
 import json
 import os
 import secrets
@@ -15,6 +14,7 @@ from .analytics import uptime
 from .settings import save_settings, settings_payload
 from .alerts import ALERTS
 from .ingest import ingest
+from .tokens import has_own_token, push_identity
 from .queries import alert_history, annotations, overview, series, ssh_fails, ssh_sessions
 from .auth import DUMMY_HASH, SESSIONS, check_password, users
 
@@ -159,12 +159,22 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, {"ok": True}, headers=[("Set-Cookie", self.cookie(tok, CFG["session_days"] * 86400))])
 
     def push(self):
-        # сравнение байтов: строка с не-ASCII символами вызвала бы исключение
-        if not hmac.compare_digest(self.headers.get("Authorization", "").encode("utf-8", "replace"),
-                                   f"Bearer {CFG['token']}".encode()):
+        ident = push_identity(self.headers.get("Authorization", ""))
+        if not ident:
             return self.send(403, {"error": "bad token"})
         try:
-            return self.send(200, ingest(json.loads(self.rfile.read(self.body_len()))))
+            p = json.loads(self.rfile.read(self.body_len()))
+            host = str(p["host"])[:64]
+        except Exception as e:
+            return self.send(400, {"error": repr(e)})
+        # агент с чужим или общим токеном не может выдать себя за хост со своим токеном
+        kind, owner = ident
+        if kind == "host" and host != owner:
+            return self.send(403, {"error": f"токен выдан другому хосту ({owner})"})
+        if kind == "shared" and has_own_token(host):
+            return self.send(403, {"error": f"у {host} свой токен, общий для него не действует"})
+        try:
+            return self.send(200, ingest(p, auth=kind))
         except Exception as e:
             return self.send(400, {"error": repr(e)})
 

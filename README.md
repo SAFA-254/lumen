@@ -67,7 +67,7 @@
 - нет лидера Patroni, участник не в строю, большой лаг реплики, смена лидера; etcd нездоров или медленный fsync дольше 10 минут (один алерт на все узлы etcd);
 - много подключений к PostgreSQL, долгая транзакция;
 - проверка сервиса не проходит;
-- задание бэкапа завершилось ошибкой, бэкап гостя устарел (субботы и воскресенья в возраст не считаются: задание идёт по будням);
+- задание бэкапа завершилось ошибкой, бэкап гостя устарел (если в настройках отмечено, что бэкапы идут только по будням, субботы и воскресенья в возраст не считаются);
 - узел Proxmox не в сети;
 - сетевой канал загружен выше порога; ошибок в журнале больше порога; iowait выше порога;
 - нагрузка (CPU, iowait, диск, сеть) в несколько раз выше обычной для этого часа — по истории прошлых дней;
@@ -85,7 +85,7 @@
 
 - по понедельникам вместе со сводкой приходят итоги недели: доступность хостов, сервисов и самого Luxmon, частые алерты, рост дисков, пики сети, ошибки журналов, бэкапы и PBS, ожидающие обновления, входы по SSH;
 - алерты и утренняя сводка идут через `notify_cmd` (`tg-notify.py`, токен и чат в `/etc/luxmon/telegram.env`);
-- команды `/status`, `/alerts`, `/mute pve2 1h причина`, `/unmute`, `/summary`, `/week` принимает отдельный бот: добавь `LUXMON_BOT_TOKEN=...` в `telegram.env` (основной бот нельзя: его уже опрашивает alertmanager-bot, а Telegram не даёт двум программам читать сообщения одного бота). Команды принимаются только из чатов `LUXMON_BOT_CHATS` (по умолчанию `TELEGRAM_CHAT`).
+- команды `/status`, `/alerts`, `/mute pve2 1h причина`, `/unmute`, `/summary`, `/week` принимает отдельный бот: добавь `LUXMON_BOT_TOKEN=...` в `telegram.env` (основной подойдёт, только если его не опрашивает другая программа: Telegram не даёт двум программам читать сообщения одного бота). Команды принимаются только из чатов `LUXMON_BOT_CHATS` (по умолчанию `TELEGRAM_CHAT`).
 
 ## Вход и HTTPS
 
@@ -94,6 +94,14 @@
 - смена пароля завершает все сессии этого пользователя; вход с неизвестным именем занимает столько же времени, сколько с неверным паролем;
 - страницы отдаются с политикой безопасности (CSP) и одноразовым номером для скрипта: внедрённый в данные код не выполнится, даже если где-то пропущено экранирование. Поэтому в разметке нет обработчиков `onclick="…"`, используется `data-open`;
 - каталог базы доступен только владельцу (700), файлы базы 600;
+
+## Агенты и токены
+
+- у каждого хоста свой токен: `/opt/luxmon/luxmon-server.py token add web1` печатает новый токен, его нужно вписать в `token` в `agent.json` на этом хосте. Повторный `add` заменяет токен, `token del web1` отзывает, `token list` показывает, кто присылает данные со своим токеном, а кто с общим;
+- токеном хоста нельзя прислать данные за другой хост. На сервере хранится только sha256 от токена;
+- общий токен `token` из `server.json` оставлен для перехода: он действует только для хостов без своего токена. Когда у всех хостов будут свои, убери его из конфига и перезапусти сервер;
+- сервер работает от пользователя `luxmon` (`deploy/luxmon-server-setup.sh` создаёт его и отдаёт ему базу и конфиг): из прав root у него только порты ниже 1024, писать можно лишь в `/var/lib/luxmon`. Команды `passwd` и `token` запускаются от root, сервер они не перезапускают;
+- агенту нужен root (smartctl, ceph, pvesh, запросы к PostgreSQL от имени postgres), но системные каталоги и домашние папки systemd открывает ему только на чтение.
 - HTTPS включается полями `tls_cert` и `tls_key`; `redirect_port: 80` перенаправляет HTTP на HTTPS. Агенты проверяют сертификат сервера по `ca_file`.
 
 Самоподписанный сертификат:
@@ -117,7 +125,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 
 ```
 agent/luxmon-agent.py        агент
-server/luxmon-server.py      запуск сервера и команда passwd
+server/luxmon-server.py      запуск сервера, команды passwd и token
 server/luxmon/               ядро сервера:
   config.py                   конфигурация и пороги
   store.py                    SQLite и журнал событий
@@ -128,12 +136,14 @@ server/luxmon/               ядро сервера:
   queries.py                  чтение данных для API
   reports.py                  статус, утренняя сводка, итоги недели
   bot.py, telegram.py         команды бота и Telegram API
-  auth.py                     пароли и сессии
+  auth.py, passwd.py          пароли и сессии
+  tokens.py                   токены агентов
   httpd.py                    HTTP API и страницы
 server/web/index.html       дашборд
 server/web/login.html       страница входа
 server/tg-notify.py         отправка в Telegram
 deploy/*.service            юниты systemd
+deploy/luxmon-server-setup.sh  пользователь luxmon и права на файлы сервера
 deploy/server.crt           сертификат сервера, который агенты используют для проверки HTTPS
 examples/                   примеры конфигов
 install.sh                  обновление кода на всех хостах кластера (агенты в VM — через qemu-guest-agent)
@@ -146,13 +156,15 @@ tests/                      тесты: python3 -m unittest discover tests (ну
 
 ```bash
 mkdir -p /opt/luxmon /etc/luxmon && chmod 700 /etc/luxmon
-cp -r server/luxmon-server.py server/luxmon server/tg-notify.py server/web /opt/luxmon/
-cp examples/server.json /etc/luxmon/server.json            # задать token, tls_cert, tls_key
+cp -r server/luxmon-server.py server/luxmon server/tg-notify.py server/web deploy/luxmon-server-setup.sh /opt/luxmon/
+cp examples/server.json /etc/luxmon/server.json            # задать tls_cert, tls_key, public_url
 cp examples/telegram.env.example /etc/luxmon/telegram.env  # токен бота и chat id
 chmod 600 /etc/luxmon/*
+/opt/luxmon/luxmon-server-setup.sh                         # пользователь luxmon и права
 cp deploy/luxmon-server.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now luxmon-server
 /opt/luxmon/luxmon-server.py passwd admin
+/opt/luxmon/luxmon-server.py token add pve1                # для каждого хоста с агентом
 ```
 
 **Агент** на каждом хосте:
@@ -161,7 +173,7 @@ systemctl daemon-reload && systemctl enable --now luxmon-server
 mkdir -p /opt/luxmon /etc/luxmon && chmod 700 /etc/luxmon
 cp agent/luxmon-agent.py /opt/luxmon/
 cp deploy/server.crt /etc/luxmon/server.crt
-cp examples/agent-pve-node.json /etc/luxmon/agent.json     # server, token, host, modules, ca_file
+cp examples/agent-pve-node.json /etc/luxmon/agent.json     # server, token (из token add), host, modules, ca_file
 chmod 600 /etc/luxmon/agent.json
 cp deploy/luxmon-agent.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now luxmon-agent
@@ -169,7 +181,7 @@ systemctl daemon-reload && systemctl enable --now luxmon-agent
 
 ## API
 
-- `POST /api/push` — приём данных от агента, заголовок `Authorization: Bearer <token>`; в ответе — список проверок для этого агента
+- `POST /api/push` — приём данных от агента, заголовок `Authorization: Bearer <токен хоста>`; в ответе — список проверок для этого агента
 - `GET /api/health` — без входа: работает ли сервер и возраст последних данных (для сторожа)
 - `POST /api/login`, `POST /api/logout` — вход и выход
 - `GET /api/ssh?days=7` — все входы, выходы и неудачные попытки по SSH за период
@@ -185,5 +197,7 @@ systemctl daemon-reload && systemctl enable --now luxmon-agent
 
 ## Заметки
 
-- Если шлюз подменяет TLS-сертификаты (как USIAG), поставь его корневой сертификат в систему. Сервер при обращении к Telegram отключает только строгую проверку X.509 в Python 3.13, потому что в сертификате USIAG нет поля Authority Key Identifier; цепочка и имя хоста по-прежнему проверяются.
+- Если шлюз подменяет TLS-сертификаты, поставь его корневой сертификат в систему. Если в этом сертификате нет поля Authority Key Identifier, Python 3.13 его отвергнет: добавь `TELEGRAM_X509_STRICT=0` в `telegram.env`, тогда отключится только строгая проверка X.509, а цепочка и имя хоста по-прежнему проверяются.
+- Проверки сервисов выполняет один хост — его выбирают в настройках; пока не выбран, проверки берёт первый хост, приславший данные.
+- Сторож `deploy/luxmon-watchdog.py` ставится на другую машину с агентом и берёт адрес сервера из её `agent.json`.
 - `install.sh` написан под конкретный кластер: адреса узлов, номера CT и VM в нём заданы явно.

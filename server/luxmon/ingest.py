@@ -59,7 +59,7 @@ SERIES_LAST = {}
 CLOCK_SKEW = {}  # host -> последние оценки расхождения часов, мс (агент присылает время отправки)
 
 
-def ingest(p):
+def ingest(p, auth=None):
     host = str(p["host"])[:64]
     now = time.time()
     ts = int(p.get("ts") or now)
@@ -77,6 +77,7 @@ def ingest(p):
                 rows.append((group[:64], k[:128], ts, float(v)))
     latest = {k: p.get(k) for k in ("metrics", "disks", "info", "interval", "ifaces")}
     latest["ts"] = ts
+    latest["auth"] = auth  # "host" — свой токен, "shared" — общий
     clock = dict(p.get("clock") or {})
     if isinstance(p.get("sent"), (int, float)):
         # время в пути до сервера — миллисекунды, медиана по 5 отправкам сглаживает задержки сети
@@ -139,6 +140,12 @@ def ingest(p):
             S.meta_set("settings", st)
         except ValueError as e:
             print("checks import:", e, file=sys.stderr, flush=True)
+
+    if checks_list() is not None and not settings()["checks_runner"]:
+        st = settings()
+        st["checks_runner"] = host
+        S.meta_set("settings", st)
+        event("info", f"Проверки сервисов выполняет {host}: другой хост можно выбрать в настройках")
 
     reply = {"ok": True}
     if checks_list() is not None:

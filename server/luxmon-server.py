@@ -4,23 +4,34 @@
 
 Использование:
   luxmon-server.py               запустить сервер
-  luxmon-server.py passwd USER   задать пароль для входа в веб-интерфейс"""
+  luxmon-server.py passwd USER   задать пароль для входа в веб-интерфейс
+  luxmon-server.py token add HOST | token del HOST | token list
+                                 токены агентов: у каждого хоста свой"""
+import os
 import ssl
 import sys
 import threading
 import time
 from http.server import ThreadingHTTPServer
 
-from luxmon.config import CFG, CONFIG_PATH
-from luxmon.analytics import rollup_and_prune
-from luxmon.alerts import ALERTS
-from luxmon.reports import maybe_send_summary
-from luxmon.bot import bot_loop
-from luxmon.auth import cmd_passwd
-from luxmon.httpd import Handler, Redirect, TLSServer
+from luxmon.config import CFG
+
+
+def as_db_owner():
+    """Команды из консоли запускают от root, а база принадлежит пользователю сервера:
+    работаем от его имени, иначе созданные файлы базы окажутся серверу недоступны."""
+    d = os.path.dirname(CFG["db"])
+    if os.geteuid() == 0 and os.path.isdir(d) and os.stat(d).st_uid:
+        st = os.stat(d)
+        os.setgroups([])
+        os.setgid(st.st_gid)
+        os.setuid(st.st_uid)
 
 
 def background():
+    from luxmon.analytics import rollup_and_prune
+    from luxmon.alerts import ALERTS
+    from luxmon.reports import maybe_send_summary
     tick = 0
     while True:
         time.sleep(15)
@@ -37,9 +48,19 @@ def background():
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "passwd":
+        from luxmon.passwd import cmd_passwd
         return cmd_passwd(sys.argv[2])
-    if not CFG["token"]:
-        sys.exit("token не задан в " + CONFIG_PATH)
+    if len(sys.argv) >= 2 and sys.argv[1] == "token":
+        as_db_owner()
+        from luxmon.tokens import cmd_token
+        return cmd_token(sys.argv[2:])
+    if len(sys.argv) > 1:
+        sys.exit(__doc__)
+    from luxmon.bot import bot_loop
+    from luxmon.httpd import Handler, Redirect, TLSServer
+    from luxmon.tokens import any_tokens
+    if not any_tokens():
+        print("токенов агентов нет: выдайте их командой token add ХОСТ", file=sys.stderr, flush=True)
     threading.Thread(target=background, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
     if CFG["tls_cert"]:

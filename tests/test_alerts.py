@@ -3,6 +3,7 @@ import unittest
 
 from common import ALERTS, Clock, S, payload, reset
 from luxmon.analytics import backup_work_age
+from luxmon.settings import backup_age, save_settings
 from luxmon.alerts import Alerts
 from luxmon.ingest import ingest
 
@@ -108,10 +109,21 @@ class AlertEngine(unittest.TestCase):
 
 
 class BackupAge(unittest.TestCase):
+    def setUp(self):
+        reset()
+
+    def test_setting_switches_weekend_counting(self):
+        friday = time.mktime((2026, 10, 30, 12, 0, 0, 0, 0, -1))
+        monday = time.mktime((2026, 11, 2, 12, 0, 0, 0, 0, -1))
+        self.assertEqual(backup_age(friday, monday), 3 * 24 * 3600)
+        save_settings({"backup_weekdays_only": True})
+        self.assertEqual(backup_age(friday, monday), 24 * 3600)
+
     def test_weekend_not_counted(self):
         friday = time.mktime((2026, 10, 30, 12, 0, 0, 0, 0, -1))
         monday = time.mktime((2026, 11, 2, 12, 0, 0, 0, 0, -1))
         self.assertEqual(backup_work_age(friday, monday), 24 * 3600)
+        self.assertEqual(backup_work_age(friday, monday, weekdays_only=False), 3 * 24 * 3600)
 
     def test_weekday_counted_fully(self):
         monday = time.mktime((2026, 11, 2, 12, 0, 0, 0, 0, -1))
