@@ -111,10 +111,13 @@ function lineChart(el, series, opt = {}) {
   let paths = "";
   for (const s of series) {
     if (!s.points.length) continue;
-    // разрыв линии, если между точками пропуск больше 3 шагов
+    // разрыв линии, если между точками пропуск больше 3 шагов; шаг — не меньше обычного
+    // интервала между точками: Ceph и PostgreSQL приходят раз в минуту, а шаг за 1 ч — 15 с
+    const gaps = s.points.slice(1).map((p, i) => p[0] - s.points[i][0]).sort((a, b) => a - b);
+    const gapMax = Math.max(s.step || 60, gaps[gaps.length >> 1] || 0) * 3;
     let d = "", prev = null;
     for (const [t, v] of s.points) {
-      d += (prev == null || t - prev > (s.step || 60) * 3 ? "M" : "L") + x(t).toFixed(1) + " " + y(v).toFixed(1);
+      d += (prev == null || t - prev > gapMax ? "M" : "L") + x(t).toFixed(1) + " " + y(v).toFixed(1);
       prev = t;
     }
     if (s.fill && !s.dash) {
