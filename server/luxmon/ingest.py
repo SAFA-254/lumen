@@ -80,11 +80,14 @@ def ingest(p, auth=None):
     latest["auth"] = auth  # "host" — свой токен, "shared" — общий
     clock = dict(p.get("clock") or {})
     if isinstance(p.get("sent"), (int, float)):
-        # время в пути до сервера — миллисекунды, медиана по 5 отправкам сглаживает задержки сети
+        # разница «отправлено − получено», мс. Задержка в сети или на сервере (очередь после его перезапуска)
+        # только уменьшает её, поэтому берём не медиану, а вторую по величине из 5: хватает двух отправок
+        # без задержки, а один случайный выброс вверх не считается. Пока отправок меньше трёх — оценки нет.
         hist = CLOCK_SKEW.setdefault(host, [])
         hist.append((p["sent"] - now) * 1000)
         del hist[:-5]
-        clock["skew_ms"] = round(sorted(hist)[len(hist) // 2], 1)
+        if len(hist) >= 3:
+            clock["skew_ms"] = round(sorted(hist)[-2], 1)
     latest["clock"] = clock
     known = settings()["ssh_known"]
     ssh = p.get("ssh_logins") or []

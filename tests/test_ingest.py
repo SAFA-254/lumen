@@ -73,7 +73,22 @@ class Ingest(unittest.TestCase):
             r2 = ingest(payload("n1", c.now))
         self.assertEqual((len(r1["checks"]), r2["checks"]), (1, []))
 
-    def test_clock_skew_is_median(self):
+    def test_clock_skew_ignores_slow_server(self):
+        # три отправки из пяти пришли с опозданием на 5 с (сервер только что перезапустился) — часы в порядке
+        with Clock() as c:
+            for late in (5, 5, 0.05, 5, 0.05):
+                ingest(payload(now=c.now, sent=c.now - late))
+        latest = json.loads(S.q("SELECT latest FROM hosts")[0][0])
+        self.assertAlmostEqual(latest["clock"]["skew_ms"], -50, delta=1)
+
+    def test_clock_skew_needs_three_pushes(self):
+        with Clock() as c:
+            for _ in range(2):
+                ingest(payload(now=c.now, sent=c.now - 10))
+        latest = json.loads(S.q("SELECT latest FROM hosts")[0][0])
+        self.assertNotIn("skew_ms", latest["clock"])
+
+    def test_clock_skew_one_jump_ignored(self):
         with Clock() as c:
             for s in (0.1, 0.1, 50, 0.1, 0.1):
                 ingest(payload(now=c.now, sent=c.now + s))
