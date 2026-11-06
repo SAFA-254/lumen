@@ -88,6 +88,8 @@ def save_settings(body):
         st["summary_time"] = t
     if "weekly_report" in body:
         st["weekly_report"] = bool(body["weekly_report"])
+    if "notify_anomalies" in body:
+        st["notify_anomalies"] = bool(body["notify_anomalies"])
     if "backup_weekdays_only" in body:
         st["backup_weekdays_only"] = bool(body["backup_weekdays_only"])
     if "checks_runner" in body:

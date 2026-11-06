@@ -49,6 +49,29 @@ def ssh_fails(since):
                 "WHERE fail=1 AND ts > ? GROUP BY host, ip ORDER BY MAX(ts) DESC", (since,))]
 
 
+# тревога -> метрика, по которой видно, растёт проблема или проходит: (хост, метрика, единица)
+ALERT_METRIC = {"cpu": "cpu", "mem": "mem", "temp": "temp", "net": "net_util", "iowait": "iowait", "dlat": "disk_lat",
+                "agent": "agent_io", "logs": "log_err"}
+ALERT_SUB = {("cpu", "load"): "load1", ("mem", "swap"): "swap", ("mem", "psi"): "mem_psi"}
+UNITS = {"cpu": "%", "mem": "%", "swap": "%", "mem_psi": "%", "iowait": "%", "net_util": "%", "temp": "°C",
+         "disk_lat": "мс", "agent_io": "Б/с", "disk_r": "Б/с", "disk_w": "Б/с", "net_rx": "бит", "net_tx": "бит",
+         "load1": "", "log_err": "/мин"}
+
+
+def alert_metric(key):
+    kind, _, rest = key.partition(":")
+    host, _, sub = rest.partition(":")
+    if kind == "anom":
+        metric = sub
+    elif kind == "disk" and sub.startswith("/") and ":" not in sub:
+        return host, "disk:" + sub, "%"
+    elif kind == "chk":
+        return "_checks", rest, "мс"
+    else:
+        metric = ALERT_SUB.get((kind, sub)) or (None if sub else ALERT_METRIC.get(kind))
+    return (host, metric, UNITS.get(metric, "")) if metric and host else None
+
+
 def overview():
     now = time.time()
     hosts = []
@@ -67,10 +90,17 @@ def overview():
         g["stale"] = g["work_age"] > rules()["backup_max_age_h"] * 3600
     events = [{"ts": t, "level": l, "msg": m}
               for t, l, m in S.q("SELECT ts, level, msg FROM events ORDER BY ts DESC LIMIT 40")]
+    order = {"crit": 0, "warn": 1, "info": 2}
     alerts = sorted([dict({k: v for k, v in a.items() if k != "log_id"}, key=k, muted=ALERTS.silenced(k))
                      for k, a in ALERTS.active.items()],
-                    key=lambda a: (a["muted"], a["level"] != "crit", a["since"]))
-    silences = [dict(x, label=scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
+                    key=lambda a: (a["muted"], order.get(a["level"], 1), a["since"]))
+    for a in alerts:
+        m = alert_metric(a["key"])
+        if m:
+            # за последний час: по маленькому графику в строке видно, растёт проблема или уже проходит
+            a["host"], a["metric"], a["unit"] = m
+            a["spark"] = series(m[0], m[1], int(now - 3600), int(now), 40)["points"]
+    silences = [dict(x, label=x.get("title") or scope_label(x["scope"])) for x in ALERTS.silences if x["until"] > now]
     logins = ssh_sessions(150, now - 7 * 86400)  # панель прокручивается — показываем неделю
     return {"now": now, "hosts": hosts, "cluster": cluster, "alerts": alerts, "events": events,
             "silences": silences, "logins": logins, "ssh_fails": ssh_fails(now - 86400), "forecast": forecasts(),
@@ -144,8 +174,8 @@ def alert_history(days):
         a["count"] += 1
         a["total"] += (e or now) - max(s, since)
         a["last"] = max(a["last"], s)
-        if lvl == "crit":
-            a["level"] = "crit"
+        if lvl == "crit" or lvl == "info" and a["count"] == 1:
+            a["level"] = lvl
         if e is None:
             a["active"] = True
     items = [{"key": k, "level": l, "msg": m, "start": s, "end": e, "muted": bool(mu)}

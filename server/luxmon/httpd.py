@@ -129,7 +129,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/silence":
                 scope = str(body.get("scope", ""))
                 hosts = {r[0] for r in S.q("SELECT name FROM hosts")}
-                if scope not in SILENCE_SCOPES and not (scope.startswith("host:") and scope[5:] in hosts):
+                if scope not in SILENCE_SCOPES and not (scope.startswith("host:") and scope[5:] in hosts) \
+                        and not (scope.startswith("key:") and scope[4:] in ALERTS.active):
                     return self.send(400, {"error": "bad scope"})
                 minutes = int(body.get("minutes", 60))
                 if not 1 <= minutes <= 7 * 1440:

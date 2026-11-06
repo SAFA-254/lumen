@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest import mock
 
 from common import ALERTS, Clock, S, payload, reset
 from luxmon.analytics import backup_work_age
@@ -84,6 +85,40 @@ class AlertEngine(unittest.TestCase):
             ingest(payload(now=c.now, disks=[{"mount": "/", "used": 96, "size": 100}]))
             ALERTS.evaluate()
             self.assertTrue(any("после обслуживания" in x for x in self.sent))
+
+    ANOM = [{"host": "n1", "metric": "net_tx", "value": 1e7, "usual": 1e5, "msg": "n1: исходящий трафик намного выше"}]
+
+    def test_anomaly_is_unusual_and_quiet(self):
+        with Clock() as c, mock.patch("luxmon.alerts.anomalies", return_value=self.ANOM):
+            ingest(payload(now=c.now))
+            ALERTS.evaluate()
+            self.assertEqual(ALERTS.active["anom:n1:net_tx"]["level"], "info")
+            self.assertEqual(self.sent, [])  # «необычное» в Telegram не уходит
+            (lvl, muted), = S.q("SELECT level, muted FROM alert_log WHERE key='anom:n1:net_tx'")
+            self.assertEqual((lvl, muted), ("info", 0))  # на полосе за сутки оно видно
+        with Clock() as c, mock.patch("luxmon.alerts.anomalies", return_value=[]):
+            c.advance(3600)
+            ingest(payload(now=c.now))
+            ALERTS.evaluate()
+            self.assertNotIn("anom:n1:net_tx", ALERTS.active)
+            self.assertEqual(self.sent, [])  # и «Решено» по нему тоже
+
+    def test_anomaly_notified_when_enabled(self):
+        save_settings({"notify_anomalies": True})
+        with Clock() as c, mock.patch("luxmon.alerts.anomalies", return_value=self.ANOM):
+            ingest(payload(now=c.now))
+            ALERTS.evaluate()
+            self.assertEqual(self.sent, ["🔵 n1: исходящий трафик намного выше"])
+
+    def test_silence_one_alert(self):
+        with Clock() as c:
+            ingest(payload(now=c.now, disks=[{"mount": "/", "used": 96, "size": 100},
+                                             {"mount": "/data", "used": 96, "size": 100}]))
+            ALERTS.evaluate()
+            sil = ALERTS.add_silence("key:disk:n1:/", 60, "", "test")
+            self.assertEqual(sil["title"], "тревога «n1: диск / 96%»")
+            self.assertTrue(ALERTS.silenced("disk:n1:/"))
+            self.assertFalse(ALERTS.silenced("disk:n1:/data"))
 
     def test_scope_matches(self):
         m = Alerts.scope_matches

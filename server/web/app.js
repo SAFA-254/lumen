@@ -74,18 +74,27 @@ function spark(points, color, floor = 10) {
 // Все графики открытой панели связаны: курсор показывает одно и то же время на всех,
 // выделение мышью приближает период, полосы отмечают алерты и обслуживание.
 let CHARTS = [], ZOOM = null;
-const ANN_COLOR = {crit: "--crit", warn: "--warn", maint: "--info"};
+const ANN_COLOR = {crit: "--crit", warn: "--warn", info: "--c1", maint: "--info"};
+function niceMax(v, b1024) {
+  if (!(v > 0)) return 1;
+  let scale = 1;
+  if (b1024) while (v / scale >= 1024) scale *= 1024;
+  const p = 10 ** Math.floor(Math.log10(v / scale));
+  // половина шкалы тоже подписывается — поэтому только такие верхи, у которых половина круглая
+  return [1, 2, 4, 6, 8, 10].find(k => k * p >= v / scale) * p * scale;
+}
 
 function lineChart(el, series, opt = {}) {
   const W = el.clientWidth || 440, H = 170, L = 52, R = 8, T = 8, B = 20;
   const all = series.flatMap(s => s.points);
   if (!all.length) { el.innerHTML = `<div class="empty" style="height:${H}px;display:grid;place-items:center">нет данных</div>`; return; }
   const t0 = opt.start ?? Math.min(...all.map(p => p[0])), t1 = opt.end ?? (Math.max(...all.map(p => p[0])) || t0 + 1);
-  let max = opt.max ?? Math.max(opt.minMax || 0, Math.max(...all.map(p => p[1])) * 1.15);
-  if (!max || max <= 0) max = 1;
+  const yf = opt.fmt || (v => v.toFixed(0));
+  // круглый верх шкалы: подписи 0 / половина / верх — «0, 10, 20 мс», а не «0, 13, 25 мс»
+  const top = Math.max(opt.minMax || 0, Math.max(...all.map(p => p[1])) * 1.05);
+  let max = opt.max ?? (yf == fmt.bits ? niceMax(top * 8) / 8 : niceMax(top, yf == fmt.rate || yf == fmt.bytes));
   const x = t => L + (t - t0) / (t1 - t0 || 1) * (W - L - R);
   const y = v => T + (1 - Math.min(v, max) / max) * (H - T - B);
-  const yf = opt.fmt || (v => v.toFixed(0));
   let g = `<g class="grid">`;
   for (let i = 0; i <= 4; i++) g += `<line x1="${L}" x2="${W - R}" y1="${y(max * i / 4)}" y2="${y(max * i / 4)}"/>`;
   g += `</g><g class="axis">`;
@@ -106,7 +115,9 @@ function lineChart(el, series, opt = {}) {
     }
     const a0 = Math.max(a.start, t0), a1 = Math.min(a.end ?? Date.now() / 1000, t1);
     if (a1 <= a0) continue;
-    ann += `<rect x="${x(a0)}" y="${T}" width="${Math.max(2, x(a1) - x(a0))}" height="${H - T - B}" fill="${css(ANN_COLOR[a.kind] || "--warn")}" opacity="${a.kind == "maint" ? .1 : .14}"><title>${esc(a.msg)}</title></rect>`;
+    // тревога — полоска над графиком и едва заметный фон: линии остаются читаемыми, даже если тревога шла весь период
+    const col = css(ANN_COLOR[a.kind] || "--warn"), w = Math.max(2, x(a1) - x(a0));
+    ann += `<g><rect x="${x(a0)}" y="${T}" width="${w}" height="${H - T - B}" fill="${col}" opacity=".04"/><rect x="${x(a0)}" y="1" width="${w}" height="4" rx="1" fill="${col}" opacity="${a.kind == "maint" ? .5 : .85}"/><title>${esc(a.msg)}</title></g>`;
   }
   let paths = "";
   for (const s of series) {
@@ -577,35 +588,128 @@ function setState(state, n) {
   document.title = n ? `(${n}) Omega Luxmon` : "Omega Luxmon";
 }
 
-/* Главный статус: коротко, что сейчас с кластером */
+/* Главный статус: коротко, что сейчас с кластером. «Необычное» (выше обычного для этого часа) проблемой не считается */
 function renderHero(d, live, crit, warn) {
-  const crits = live.filter(a => a.level == "crit");
+  const crits = live.filter(a => a.level == "crit"), act = live.filter(a => a.level != "info"), odd = live.length - act.length;
   const muted = d.alerts.length - live.length;
-  const title = crit == 1 ? esc(crits[0].msg) : crit ? `${crit} ${plural(crit, "критичная проблема", "критичные проблемы", "критичных проблем")}`
+  const title = crit == 1 ? `<span class="hlink" data-open="@alert:${esc(crits[0].key)}">${esc(crits[0].msg)}</span>` : crit ? `${crit} ${plural(crit, "критичная проблема", "критичные проблемы", "критичных проблем")}`
     : warn ? `${warn} ${plural(warn, "предупреждение", "предупреждения", "предупреждений")}` : "Всё работает";
   // «спокойно» считаем от последней тревоги или её решения в ленте событий
   const calm = d.events.find(e => e.level == "warn" || e.level == "crit" || e.msg.startsWith("Решено"));
-  const oldest = live.length ? Math.min(...live.map(a => a.since)) : null;
-  const sub = [live.length ? `началось ${fmt.ago(d.now - oldest)}` : calm ? `спокойно уже ${fmt.dur(d.now - calm.ts)}` : "тревог в недавних событиях нет",
+  const oldest = act.length ? act.reduce((x, a) => a.since < x.since ? a : x) : null;
+  const sub = [
+    act.length ? `${act.length} ${plural(act.length, "требует", "требуют", "требуют")} действий` : calm ? `спокойно уже ${fmt.dur(d.now - calm.ts)}` : "тревог в недавних событиях нет",
+    odd && `${odd} ${plural(odd, "необычное", "необычных", "необычных")}`,
+    oldest && `самое старое — ${esc(shortMsg(oldest))} (с ${fmt.time(oldest.since, notToday(oldest.since, d.now))})`,
     muted && `${ic("mute")} заглушено ${muted}`].filter(Boolean).join(" · ");
   const last = d.events[0];
   $("#hero").innerHTML = `<div class="hero">${FLAME}<div class="hero-t"><div class="hero-h">${title}</div><div class="hero-s">${sub}</div></div>
     <div class="hero-r"><div class="clock num">${new Date(d.now * 1000).toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"})}</div>${last ? `<div class="ev-last"><div class="ttl">последнее событие · ${fmt.time(last.ts, d.now - last.ts > 86400)}</div>${esc(last.msg)}</div>` : ""}</div>${dayStrip(d)}</div>`;
 }
 
-/* Сутки по 15 минут: худшее состояние за отрезок; серым — когда сам Luxmon не получал данные */
+/* Сутки по 15 минут: худшее состояние за отрезок; «необычное» — бледно-синим; серым — когда сам Luxmon не получал данные */
 function dayStrip(d) {
   if (!d.day) return "";
   const step = 900, t0 = d.now - 96 * step;
   const hit = (a, b, s) => a < s + step && (b ?? d.now) > s;
-  let cells = "", n = d.day.alerts.filter(a => (a.end ?? d.now) > t0).length;
+  const recent = d.day.alerts.filter(a => (a.end ?? d.now) > t0), odd = recent.filter(a => a.level == "info").length, n = recent.length - odd;
+  let cells = "";
   for (let i = 0; i < 96; i++) {
     const s = t0 + i * step, on = d.day.alerts.filter(a => hit(a.start, a.end, s));
-    const lv = on.some(a => a.level == "crit") ? "crit" : on.length ? "warn" : d.day.gaps.some(g => hit(g[0], g[1], s)) ? "off" : "";
+    const lv = on.some(a => a.level == "crit") ? "crit" : on.some(a => a.level != "info") ? "warn" : on.length ? "info" : d.day.gaps.some(g => hit(g[0], g[1], s)) ? "off" : "";
     const tip = `${fmt.time(s)}–${fmt.time(s + step)}: ` + (on.length ? on.slice(0, 4).map(a => a.msg).join("; ") + (on.length > 4 ? ` и ещё ${on.length - 4}` : "") : lv == "off" ? "нет данных" : "без тревог");
     cells += `<i class="${lv}" title="${esc(tip)}"></i>`;
   }
-  return `<div class="day"><div class="day-b">${cells}</div><div class="day-l"><span>24 часа назад</span><span>${n ? `${n} ${plural(n, "тревога", "тревоги", "тревог")} за сутки` : "за сутки без тревог"}</span><span>сейчас</span></div></div>`;
+  const cnt = [n && `${n} ${plural(n, "тревога", "тревоги", "тревог")}`, odd && `${odd} ${plural(odd, "необычное", "необычных", "необычных")}`].filter(Boolean).join(" · ");
+  return `<div class="day"><div class="day-b">${cells}</div><div class="day-l"><span>24 часа назад</span><span>${cnt ? cnt + " за сутки" : "за сутки без тревог"}</span><span>сейчас</span></div></div>`;
+}
+
+/* --------------------------------------------------------------- тревоги */
+const LV_RANK = {crit: 0, warn: 1, info: 2};
+const worstLevel = list => list.reduce((w, a) => LV_RANK[a.level] < LV_RANK[w] ? a.level : w, "info");
+const HOST_KINDS = new Set(["down", "cpu", "mem", "temp", "disk", "net", "iowait", "dlat", "agent", "clock", "logs", "if", "anom", "fc", "ssh"]);
+// хост тревоги: из ответа сервера, иначе — второе поле ключа (cpu:pve1, disk:pve1:/var)
+const alertHost = a => a.host && a.host[0] != "_" ? a.host : HOST_KINDS.has(a.key.split(":")[0]) ? a.key.split(":")[1] : null;
+const shortMsg = a => { const h = alertHost(a); return h && a.msg.startsWith(h + ": ") ? a.msg.slice(h.length + 2) : a.msg; };
+function alertIcon(a) {
+  const [kind, , sub] = a.key.split(":"), m = a.metric || (kind == "anom" ? sub : "") || "";
+  if (/^(bk|pbs)$/.test(kind)) return "backup";
+  if (kind == "ssh") return "login";
+  if (kind == "temp") return "temp";
+  if (/^(disk|smart|dlat|stor|ceph|fc|pg|pgdb)$/.test(kind) || /^disk/.test(m)) return "disk";
+  if (/^(net|if|etcd|etcdlat|chk|cert)$/.test(kind) || /^net/.test(m)) return "net";
+  return /^(anom|cpu|mem|iowait|down|node|agent|clock|logs)$/.test(kind) ? "node" : "alert";
+}
+const UNIT_FMT = {"%": v => v.toFixed(0) + "%", "бит": fmt.bits, "Б/с": fmt.rate, "мс": v => v.toFixed(0) + " мс", "°C": v => v.toFixed(0) + " °C", "/мин": v => v.toFixed(1) + "/мин"};
+const unitFmt = u => UNIT_FMT[u] || (v => v.toFixed(v >= 10 ? 0 : 1));
+// дата — если началось не сегодня: «с 13:23» о вчерашнем дне путает
+const notToday = (ts, now) => new Date(ts * 1000).toDateString() != new Date(now * 1000).toDateString();
+const since = (a, now) => `<span class="a-t" title="началось ${fmt.time(a.since, true)}">с ${fmt.time(a.since, notToday(a.since, now))}<small>${fmt.dur(now - a.since)}</small></span>`;
+function alertRow(a, now, extra = "") {
+  const host = alertHost(a), sp = a.spark?.length > 1 ? `<span class="a-spark" title="последний час, сейчас ${esc(unitFmt(a.unit)(a.spark.at(-1)[1]))}">${spark(a.spark, lvColor(a.level == "info" ? "" : a.level), 0)}</span>` : `<span class="a-spark"></span>`;
+  return `<div class="arow ${a.level} ${a.muted ? "muted" : ""}" data-akey="${esc(a.key)}" role="button" tabindex="0" title="подробнее">
+    <span class="a-ic">${ic(alertIcon(a))}</span>${extra}<span class="a-msg">${host ? `<span class="a-host">${esc(host)}</span>` : ""}${a.muted ? ic("mute") + " " : ""}${esc(host ? shortMsg(a) : a.msg)}</span>${sp}${since(a, now)}</div>`;
+}
+// Тревоги, начавшиеся одна за другой с промежутками до 10 минут, — скорее всего, одна причина.
+// Инцидентом считаем от трёх тревог разных видов: однотипные (бэкапы, диски) сворачиваются по виду.
+function incidents(list) {
+  const out = [];
+  for (const a of [...list].sort((x, y) => x.since - y.since)) {
+    const g = out.at(-1);
+    if (g && a.since - g.at(-1).since <= 600) g.push(a); else out.push([a]);
+  }
+  return out.filter(g => g.length >= 3 && new Set(g.map(a => a.key.split(":")[0])).size >= 2);
+}
+const offset = s => s < 60 ? "сразу" : `+${fmt.short(s)}`;
+function incidentCard(g, now) {
+  const lv = worstLevel(g), k = "inc:" + g[0].key, end = Math.max(...g.map(a => a.since));
+  const hosts = [...new Set(g.map(alertHost).filter(Boolean))];
+  return `<details class="bgroup inc ${lv}" data-g="${esc(k)}" ${GROUPS_OPEN.has(k) ? "open" : ""}><summary class="arow ${lv}">
+    <span class="a-ic">${ic("alert")}</span><span class="a-msg"><b>Инцидент: ${g.length} ${plural(g.length, "тревога", "тревоги", "тревог")}</b>
+    <span class="muted">· первой было «${esc(shortMsg(g[0]))}»${hosts.length ? ` · ${esc(hosts.slice(0, 4).join(", "))}${hosts.length > 4 ? "…" : ""}` : ""}</span></span>
+    <span class="a-spark"></span>${since(g[0], now)}<span class="chev">▾</span></summary>
+    <div class="gbody"><div class="faint inc-note">Начались одна за другой, ${fmt.time(g[0].since)}–${fmt.time(end)} — вероятно, у них одна причина, и она в первой.</div>
+    ${g.map(a => alertRow(a, now, `<span class="a-off num">${offset(a.since - g[0].since)}</span>`)).join("")}</div></details>`;
+}
+/* Три и больше однотипных алерта сворачиваются в одну строку; раскрытые группы помним между обновлениями */
+const GROUP_TITLES = {bk: n => `Бэкапы устарели: ${n} ${plural(n, "гость", "гостя", "гостей")}`,
+  chk: n => `Не отвечают сервисы: ${n}`, disk: n => `Проблемы с дисками: ${n}`, smart: n => `Предупреждения SMART: ${n}`};
+const GROUPS_OPEN = new Set();
+function kindGroups(list, now) {
+  const groups = new Map();
+  list.forEach(a => { const k = `${a.key.split(":")[0]}|${a.level}|${a.muted ? 1 : 0}`; groups.set(k, [...(groups.get(k) || []), a]); });
+  return [...groups].map(([k, g]) => {
+    if (g.length < 3) return g.map(a => alertRow(a, now)).join("");
+    const a = g[0], title = GROUP_TITLES[k.split("|")[0]]?.(g.length) || `${a.msg} и ещё ${g.length - 1}`;
+    const first = g.reduce((x, y) => y.since < x.since ? y : x);
+    return `<details class="bgroup" data-g="${esc(k)}" ${GROUPS_OPEN.has(k) ? "open" : ""}><summary class="arow ${a.level} ${a.muted ? "muted" : ""}"><span class="a-ic">${ic(alertIcon(a))}</span><span class="a-msg">${a.muted ? ic("mute") + " " : ""}<b>${esc(title)}</b></span><span class="a-spark"></span>${since(first, now)}<span class="chev">▾</span></summary><div class="gbody">${g.map(x => alertRow(x, now)).join("")}</div></details>`;
+  }).join("");
+}
+function alertBanners(d) {
+  const now = d.now;
+  // единственная критичная проблема уже написана в главном статусе
+  const crits = d.alerts.filter(a => a.level == "crit" && !a.muted);
+  const list = d.alerts.filter(a => !(crits.length == 1 && a == crits[0]));
+  const live = list.filter(a => !a.muted), inc = incidents(live), inInc = new Set(inc.flat());
+  const rest = list.filter(a => !inInc.has(a));
+  const actInc = inc.filter(g => worstLevel(g) != "info"), oddInc = inc.filter(g => worstLevel(g) == "info");
+  const act = rest.filter(a => a.level != "info"), odd = rest.filter(a => a.level == "info");
+  let html = actInc.map(g => incidentCard(g, now)).join("") + kindGroups(act, now);
+  const nOdd = odd.length + oddInc.flat().length;
+  if (nOdd) {
+    const hosts = [...new Set([...odd, ...oddInc.flat()].map(alertHost).filter(Boolean))];
+    html += `<details class="bgroup odd" data-g="odd" ${GROUPS_OPEN.has("odd") ? "open" : ""}><summary class="arow info"><span class="a-ic">${ic("alert")}</span>
+      <span class="a-msg"><b>Необычное: ${nOdd}</b> <span class="muted">· выше обычного для этого часа${hosts.length ? " · " + esc(hosts.join(", ")) : ""} · не требует действий, в Telegram не приходит</span></span><span class="chev">▾</span></summary>
+      <div class="gbody">${oddInc.map(g => incidentCard(g, now)).join("")}${odd.map(a => alertRow(a, now)).join("")}</div></details>`;
+  }
+  return html;
+}
+function bindAlerts(root) {
+  root.querySelectorAll(".bgroup").forEach(g => g.ontoggle = () => { g.open ? GROUPS_OPEN.add(g.dataset.g) : GROUPS_OPEN.delete(g.dataset.g); });
+  root.querySelectorAll("div.arow[data-akey]").forEach(r => {
+    r.onclick = () => openDrawer("@alert:" + r.dataset.akey);
+    r.onkeydown = e => { if (e.key == "Enter") r.click(); };
+  });
 }
 
 /* Значок события по его тексту */
@@ -633,39 +737,17 @@ function renderEvents(d, seen) {
   document.querySelectorAll("#events .evg").forEach(g => g.ontoggle = () => { g.open ? EV_OPEN.add(g.dataset.k) : EV_OPEN.delete(g.dataset.k); balance(); });
 }
 
-/* Три и больше однотипных алерта сворачиваются в одну строку; раскрытые группы помним между обновлениями */
-const GROUP_TITLES = {bk: n => `Бэкапы устарели: ${n} ${plural(n, "гость", "гостя", "гостей")}`,
-  chk: n => `Не отвечают сервисы: ${n}`, disk: n => `Проблемы с дисками: ${n}`, smart: n => `Предупреждения SMART: ${n}`};
-const GROUPS_OPEN = new Set();
-function alertBanners(d) {
-  const line = a => `<div class="banner ${a.level} ${a.muted ? "muted" : ""}"><span class="dot ${a.level}"></span>${a.muted ? ic("mute") + " " : ""}${esc(a.msg)}<span class="since">${fmt.ago(d.now - a.since)}</span></div>`;
-  const groups = new Map();
-  // единственная критичная проблема уже написана в главном статусе
-  const crits = d.alerts.filter(a => a.level == "crit" && !a.muted);
-  d.alerts.filter(a => !(crits.length == 1 && a == crits[0])).forEach(a => {
-    const k = `${a.key.split(":")[0]}|${a.level}|${a.muted ? 1 : 0}`;
-    groups.set(k, [...(groups.get(k) || []), a]);
-  });
-  return [...groups].map(([k, list]) => {
-    if (list.length < 3) return list.map(line).join("");
-    const a = list[0], kind = k.split("|")[0];
-    const title = GROUP_TITLES[kind]?.(list.length) || `${a.msg} и ещё ${list.length - 1}`;
-    const since = Math.min(...list.map(x => x.since));
-    return `<details class="bgroup" data-g="${esc(k)}" ${GROUPS_OPEN.has(k) ? "open" : ""}><summary class="banner ${a.level} ${a.muted ? "muted" : ""}"><span class="dot ${a.level}"></span>${a.muted ? ic("mute") + " " : ""}${esc(title)}<span class="since">${fmt.ago(d.now - since)}<span class="chev">▾</span></span></summary><div class="gbody">${list.map(line).join("")}</div></details>`;
-  }).join("");
-}
-
 let LAST_EVENT = null;
 function render(d) {
   DATA = d;
   const live = d.alerts.filter(a => !a.muted);
-  const crit = live.filter(a => a.level == "crit").length, warn = live.length - crit;
+  const crit = live.filter(a => a.level == "crit").length, odd = live.filter(a => a.level == "info").length, warn = live.length - crit - odd;
   const sum = $("#summary");
   sum.className = "status " + (crit ? "crit" : warn ? "warn" : "");
-  sum.innerHTML = live.length
+  sum.innerHTML = (crit || warn
     ? `<span class="dot ${crit ? "crit" : "warn"}"></span>${[crit && crit + " критич.", warn && warn + " предупр."].filter(Boolean).join(" · ")}`
-    : `<span class="dot live"></span>Всё в порядке`;
-  setState(crit ? "crit" : warn ? "warn" : "ok", live.length);
+    : `<span class="dot live"></span>Всё в порядке`) + (odd ? ` <span class="faint" title="выше обычного для этого часа, действий не требует">· ${odd} необычн.</span>` : "");
+  setState(crit ? "crit" : warn ? "warn" : "ok", crit + warn);
   renderHero(d, live, crit, warn);
   $("#updated").textContent = "обновлено " + new Date(d.now * 1000).toLocaleTimeString("ru-RU");
   document.body.classList.toggle("viewer", d.role == "viewer");
@@ -674,7 +756,7 @@ function render(d) {
   $("#banners").innerHTML =
     d.silences.map(x => `<div class="banner info">${ic("mute")}<span><b>${esc(x.label)}</b> — обслуживание ещё ${fmt.dur(x.until - d.now)}${x.reason ? ` <span class="muted" style="font-weight:400">· ${esc(x.reason)}</span>` : ""}</span><button class="admin-only" style="margin-left:auto" data-sid="${esc(x.id)}">Снять</button></div>`).join("") +
     alertBanners(d);
-  document.querySelectorAll("#banners .bgroup").forEach(g => g.ontoggle = () => { g.open ? GROUPS_OPEN.add(g.dataset.g) : GROUPS_OPEN.delete(g.dataset.g); });
+  bindAlerts($("#banners"));
   document.querySelectorAll("#banners button[data-sid]").forEach(b => b.onclick = () => api("api/silence/delete", {id: b.dataset.sid}).then(refresh));
   renderKpis(d);
   renderHosts(d);
@@ -801,6 +883,7 @@ function drawOpen() {
   if (OPEN == "@ssh") return drawSSH();
   if (OPEN == "@agents") return drawAgents();
   if (OPEN.startsWith("@vm:")) return drawVM(+OPEN.slice(4));
+  if (OPEN.startsWith("@alert:")) return drawAlert(OPEN.slice(7));
   return OPEN[0] == "@" ? drawCluster(OPEN.slice(1)) : drawHost();
 }
 const rangeQS = () => ZOOM ? `start=${ZOOM[0]}&end=${ZOOM[1]}` : `range=${RANGE}`;
@@ -971,15 +1054,67 @@ async function drawCluster(kind) {
   noteList(r._annotations);
 }
 
+/* Одна тревога: график её метрики с запасом до начала, что ещё началось рядом по времени, заглушить */
+const MUTES = [[60, "1 ч"], [240, "4 ч"], [1440, "сутки"], [7 * 1440, "неделю"]];
+async function drawAlert(key) {
+  const a = DATA.alerts.find(x => x.key == key), now = DATA.now;
+  if (!a) {
+    $("#drawer-in").innerHTML = `<div class="drawer-h"><h3>Тревога закрыта</h3><span class="spacer"></span><button id="close">✕</button></div>
+      <div class="panel"><div class="empty">Этой тревоги уже нет — проблема решилась. История — в разделе «История тревог».</div></div>`;
+    return bindDrawer();
+  }
+  const host = alertHost(a), isHost = host && DATA.hosts.some(h => h.name == host);
+  const t0 = Math.floor(a.since - Math.max(3600, (now - a.since) / 2)), t1 = Math.ceil(now);
+  const LV = {crit: "критично", warn: "требует действий", info: "необычное — выше обычного для этого часа"};
+  $("#drawer-in").innerHTML = `
+    <div class="drawer-h"><span class="dot ${a.level}"></span><h3>${esc(a.msg)}</h3><span class="spacer"></span><button id="close">✕</button></div>
+    <div class="info-grid">
+      <div class="stat"><div class="l">Уровень</div><div class="v" style="font-size:13px">${LV[a.level] || a.level}${a.muted ? ` · ${ic("mute")} заглушено` : ""}</div></div>
+      <div class="stat"><div class="l">Началась</div><div class="v num">${fmt.time(a.since, notToday(a.since, now))}</div></div>
+      <div class="stat"><div class="l">Длится</div><div class="v num">${fmt.dur(now - a.since)}</div></div>
+      <div class="stat"><div class="l">${host ? "Хост" : "Где"}</div><div class="v" style="font-size:14px">${isHost ? `<button class="link" style="font-size:14px" data-open="${esc(host)}">${esc(host)} →</button>` : esc(host || a.key.split(":")[0])}</div></div>
+    </div>
+    <div class="panel admin-only" style="margin-bottom:12px"><div class="pb mutes"><span class="muted">Заглушить эту тревогу на</span>
+      ${MUTES.map(([m, l]) => `<button class="sm" data-mute="${m}">${l}</button>`).join("")}
+      ${isHost ? `<span class="spacer"></span><button class="sm" id="hostmaint">${ic("mute")} Обслуживание ${esc(host)}…</button>` : ""}</div></div>
+    ${a.metric ? `<div class="charts">${chartBox("al", "С запасом до начала тревоги", true)}</div>` : ""}
+    <div class="panel" style="margin-top:12px">${panelHead("Рядом по времени", "", "что ещё началось за полчаса до и после")}<div id="near"><div class="empty">загрузка…</div></div></div>`;
+  bindDrawer();
+  document.querySelectorAll("#drawer-in [data-mute]").forEach(b => b.onclick = async () => {
+    try { await api("api/silence", {scope: "key:" + key, minutes: +b.dataset.mute, reason: ""}); closeDrawer(); refresh(); }
+    catch (e) { alert("Ошибка: " + e.message); }
+  });
+  if ($("#hostmaint")) $("#hostmaint").onclick = () => { openMaint(); $("#m-scope").value = "host:" + host; };
+  CHARTS = [];
+  const scope = isHost ? "host:" + host : "all";
+  const [r, h] = await Promise.all([
+    a.metric ? getJSON(`api/history?host=${encodeURIComponent(a.host)}&metrics=${encodeURIComponent(a.metric)}&start=${t0}&end=${t1}&scope=${encodeURIComponent(scope)}`) : null,
+    getJSON(`api/alerts/history?days=${Math.min(30, Math.ceil((now - a.since) / 86400) + 1)}`)]);
+  if (OPEN != "@alert:" + key) return;
+  if (r) {
+    const fill = lvColor(a.level == "info" ? "" : a.level);
+    $("#lg-al").innerHTML = `<span><i style="background:${fill}"></i>${esc(a.metric.replace(/^disk:/, "диск "))}</span>`;
+    lineChart($("#ch-al"), [{name: a.metric, color: fill, fill: true, points: r[a.metric]?.points || [], step: r[a.metric]?.step}],
+      {start: t0, end: t1, fmt: unitFmt(a.unit), max: a.unit == "%" ? 100 : undefined, ann: r._annotations});
+  }
+  const near = h.items.filter(x => x.key != key && Math.abs(x.start - a.since) <= 1800).sort((x, y) => x.start - y.start);
+  const rel = x => { const d = x.start - a.since; return Math.abs(d) < 60 ? "одновременно" : (d < 0 ? "−" : "+") + fmt.short(Math.abs(d)); };
+  $("#near").innerHTML = near.length ? near.map(x => `<div class="li"><span class="dot ${x.level}"></span><span class="num muted" style="white-space:nowrap;min-width:98px">${rel(x)}</span>
+    <span>${esc(x.msg)}</span><span class="end faint">${x.end ? "закрыта" : "идёт"}</span></div>`).join("") : `<div class="empty">в это время больше ничего не начиналось</div>`;
+}
+
 function rbdTable() {
   const imgs = DATA.cluster.ceph?.images;
   if (!imgs?.length) return "";
   const names = Object.fromEntries((DATA.cluster.pve?.guests || []).map(g => [g.vmid, g.name]));
   const rows = [...imgs].sort((a, b) => (b.rd + b.wr) - (a.rd + a.wr));
-  const lat = v => `<span style="color:${v > 100 ? "var(--crit)" : v > 30 ? "var(--warn)" : ""}">${v.toFixed(1)} мс</span>`;
+  const latLv = v => v > 100 ? "crit" : v > 30 ? "warn" : "";
+  const lat = v => `<span style="color:${latLv(v) ? `var(--${latLv(v)})` : ""}">${v.toFixed(1)} мс</span>`;
+  // строка целиком подсвечивается по худшей задержке: медленный диск видно, не вчитываясь в числа
+  const rowLv = i => latLv(Math.max(i.rd_ops ? i.rd_lat : 0, i.wr_ops ? i.wr_lat : 0));
   return `<div class="panel" style="margin-top:12px">${panelHead("Нагрузка на Ceph по дискам VM", "", "за последние ~30 с")}
     <div class="tbl"><table><tr><th>Диск</th><th>Гость</th><th class="r">Чтение</th><th class="r">Запись</th><th class="r">Операций/с</th><th class="r">Задержка чтения</th><th class="r">Задержка записи</th></tr>
-    ${rows.map(i => `<tr class="${i.vmid != null ? "click" : ""}" data-vm="${esc(i.vmid)}"><td class="muted">${esc(i.pool)}/${esc(i.image)}</td><td><b style="font-weight:600">${esc(names[i.vmid] || "")}</b> <span class="faint">${esc(i.vmid)}</span></td>
+    ${rows.map(i => `<tr class="${i.vmid != null ? "click" : ""} ${rowLv(i) ? "lv-" + rowLv(i) : ""}" data-vm="${esc(i.vmid)}"><td class="muted">${esc(i.pool)}/${esc(i.image)}</td><td><b style="font-weight:600">${esc(names[i.vmid] || "")}</b> <span class="faint">${esc(i.vmid)}</span></td>
       <td class="r num">${fmt.rate(i.rd)}</td><td class="r num">${fmt.rate(i.wr)}</td><td class="r num muted">${(i.rd_ops + i.wr_ops).toFixed(0)}</td>
       <td class="r num">${i.rd_ops ? lat(i.rd_lat) : "—"}</td><td class="r num">${i.wr_ops ? lat(i.wr_lat) : "—"}</td></tr>`).join("")}</table></div></div>`;
 }
@@ -1106,6 +1241,7 @@ function renderSettings(msg, isErr) {
     <div class="sect">Утренняя сводка в Telegram</div>
     <div class="field" style="max-width:320px"><label for="sumtime">Время отправки (ЧЧ:ММ, пусто — не отправлять)</label><input id="sumtime" value="${esc(s.settings.summary_time)}" placeholder="09:00"></div>
     <label class="muted" style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="weekly" ${s.settings.weekly_report ? "checked" : ""}> По понедельникам в это же время присылать итоги недели (команда /week)</label>
+    <label class="muted" style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="anomtg" ${s.settings.notify_anomalies ? "checked" : ""}> Присылать в Telegram и «необычное» — метрики выше обычного для этого часа (без этого они видны только в панели)</label>
 
     <div class="sect">Известные адреса для SSH</div>
     <div class="muted" style="font-size:12.5px;margin-bottom:8px">Вход по SSH с адреса не из этого списка сразу приходит в Telegram. По одному адресу или подсети (например 192.168.3.0/24) на строку. После адреса можно написать имя — оно будет видно во входах: <span class="num">192.168.3.123 мой ПК</span>.</div>
@@ -1125,7 +1261,7 @@ function renderSettings(msg, isErr) {
     const body = {
       rules: Object.fromEntries([...document.querySelectorAll("[data-rule]")].map(i => [i.dataset.rule, +i.value])),
       checks: readChecks(), checks_runner: $("#runner").value,
-      summary_time: $("#sumtime").value.trim(), weekly_report: $("#weekly").checked, backup_weekdays_only: $("#bk-weekdays").checked, ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
+      summary_time: $("#sumtime").value.trim(), weekly_report: $("#weekly").checked, notify_anomalies: $("#anomtg").checked, backup_weekdays_only: $("#bk-weekdays").checked, ssh_known: $("#known").value.split("\n").map(x => x.trim()).filter(Boolean),
     };
     try { SET = await api("api/settings", body); renderSettings("Сохранено"); refresh(); }
     catch (e) { s.checks = body.checks; renderSettings(e.message, true); }
@@ -1260,7 +1396,7 @@ function openFromHash() {
   if (+p.get("r")) RANGE = +p.get("r");
   if (CMPS.some(([v]) => v == +p.get("c"))) CMP = +p.get("c");
   const t = (p.get("t") || "").split("-").map(Number), zoom = t.length == 2 && t[0] < t[1] ? t : null;
-  const cluster = ["ceph", "patroni", "checks", "settings", "history", "ssh", "agents"].includes(k) || k.startsWith("vm:");
+  const cluster = ["ceph", "patroni", "checks", "settings", "history", "ssh", "agents"].includes(k) || k.startsWith("vm:") || k.startsWith("alert:");
   if (cluster || DATA.hosts.some(h => h.name == k)) openDrawer(cluster ? "@" + k : k, zoom);
 }
 let tick = 0;
@@ -1283,4 +1419,6 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 10000);
+// при прокрутке панели курсор графика и подсказка не должны оставаться висеть на месте
+$("#drawer").addEventListener("scroll", () => hoverAll(null), {passive: true});
 let rs; addEventListener("resize", () => { clearTimeout(rs); rs = setTimeout(() => { if (DATA) balance(); OPEN && OPEN != "@settings" && drawOpen(); }, 200); });

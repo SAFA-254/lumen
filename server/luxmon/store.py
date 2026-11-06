@@ -43,6 +43,8 @@ class Store:
         for ext in ("", "-wal", "-shm"):
             if os.path.exists(path + ext):
                 os.chmod(path + ext, 0o600)
+        # аномалии раньше записывались как предупреждения; теперь это отдельный уровень «необычное»
+        self.db.execute("UPDATE alert_log SET level='info' WHERE key LIKE 'anom:%' AND level='warn'")
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(logins)")}
         for col, typ in (("port", "INTEGER"), ("end", "REAL"), ("key", "TEXT"), ("fail", "INTEGER DEFAULT 0")):
             if col not in cols:  # база от прежней версии: входы без выходов и неудачных попыток

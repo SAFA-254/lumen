@@ -9,7 +9,7 @@ from .config import CFG, SMART_NAMES
 from .store import S, event
 from .fmt import fmt_bytes, fmt_dur, fmt_minutes, scope_label
 from .analytics import anomalies, forecasts
-from .settings import backup_age, rules
+from .settings import backup_age, rules, settings
 
 
 class Alerts:
@@ -28,6 +28,8 @@ class Alerts:
     def scope_matches(scope, key):
         if scope == "all":
             return True
+        if scope.startswith("key:"):  # заглушена одна тревога
+            return key == scope[4:]
         kind, _, rest = key.partition(":")
         if scope.startswith("host:"):
             return kind in ("down", "cpu", "mem", "temp", "disk", "node", "ssh", "fc", "net", "logs", "smart",
@@ -45,11 +47,14 @@ class Alerts:
         now = time.time()
         sil = {"id": f"{int(now * 1000):x}", "scope": scope, "since": now, "until": now + minutes * 60,
                "reason": reason[:200], "by": who}
+        if scope.startswith("key:") and scope[4:] in self.active:
+            sil["title"] = "тревога «" + self.active[scope[4:]]["msg"] + "»"
         with self.lock:
             self.silences.append(sil)
             S.meta_set("silences", self.silences)
         S.q("INSERT INTO silence_log VALUES(?,?,?,?,?,NULL)", (sil["id"], scope, sil["reason"], who, now))
-        text = f"Обслуживание: {scope_label(scope)} на {fmt_minutes(minutes)}" + (f" — {reason}" if reason else "")
+        text = f"Обслуживание: {sil.get('title') or scope_label(scope)} на {fmt_minutes(minutes)}" + \
+            (f" — {reason}" if reason else "")
         event("info", text)
         self.notify("🔕 " + text)
         return sil
@@ -61,7 +66,7 @@ class Alerts:
             S.meta_set("silences", self.silences)
         for s in hit:
             S.q("UPDATE silence_log SET end=? WHERE id=?", (min(time.time(), s["until"]), sid))
-            text = f"Обслуживание закончено: {scope_label(s['scope'])} ({why})"
+            text = f"Обслуживание закончено: {s.get('title') or scope_label(s['scope'])} ({why})"
             event("info", text)
             self.notify("🔔 " + text)
         return bool(hit)
@@ -151,7 +156,7 @@ class Alerts:
                     found[f"disk:{name}:{d['mount']}"] = (lvl, f"{name}: диск {d['mount']} {pct:.0f}%", 0)
 
         for a in anomalies(r["anomaly_factor"]):
-            found[f"anom:{a['host']}:{a['metric']}"] = ("warn", a["msg"], 0)
+            found[f"anom:{a['host']}:{a['metric']}"] = ("info", a["msg"], 0)
 
         for f in forecasts():
             if f["days"] is not None and f["days"] < r["forecast_days"]:
@@ -352,23 +357,25 @@ class Alerts:
         for sil in [x for x in self.silences if x["until"] <= now]:
             self.remove_silence(sil["id"], "время вышло")
 
-        icon = lambda lvl: "🔴 " if lvl == "crit" else "🟡 "
+        icon = lambda lvl: "🔴 " if lvl == "crit" else "🔵 " if lvl == "info" else "🟡 "
+        # «необычное» уходит в Telegram, только если это включено в настройках
+        quiet = lambda lvl: lvl == "info" and not settings()["notify_anomalies"]
         for key, (lvl, msg) in fired.items():
-            muted = self.silenced(key)
+            muted = self.silenced(key) or quiet(lvl)
             old = self.active.get(key)
             if not old:
                 cur = S.q("INSERT INTO alert_log(key, level, msg, start, end, muted) VALUES(?,?,?,?,NULL,?) "
-                          "RETURNING id", (key, lvl, msg, now, int(muted)))
+                          "RETURNING id", (key, lvl, msg, now, int(self.silenced(key))))
                 self.active[key] = {"level": lvl, "msg": msg, "since": now, "notified": not muted,
                                     "log_id": cur[0][0], "hold": found[key][2]}
-                event(lvl, msg + (" (обслуживание)" if muted else ""))
+                event(lvl, msg + (" (обслуживание)" if self.silenced(key) else ""))
                 if not muted:
                     self.notify(icon(lvl) + msg)
             else:
                 if old["level"] != lvl:
                     event(lvl, msg)
-                    if lvl == "crit" and old.get("log_id"):
-                        S.q("UPDATE alert_log SET level='crit' WHERE id=?", (old["log_id"],))
+                    if old.get("log_id") and (lvl == "crit" or old["level"] == "info" or lvl == "info"):
+                        S.q("UPDATE alert_log SET level=? WHERE id=?", (lvl, old["log_id"]))
                     if not muted:
                         self.notify(icon(lvl) + msg)
                         old["notified"] = True

@@ -77,3 +77,28 @@ class Notes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlertMetric(unittest.TestCase):
+    def test_mapping(self):
+        from luxmon.queries import alert_metric
+        self.assertEqual(alert_metric("anom:pve1:net_tx"), ("pve1", "net_tx", "бит"))
+        self.assertEqual(alert_metric("cpu:pve1:load"), ("pve1", "load1", ""))
+        self.assertEqual(alert_metric("disk:pve1:/var"), ("pve1", "disk:/var", "%"))
+        self.assertEqual(alert_metric("chk:web"), ("_checks", "web", "мс"))
+        self.assertIsNone(alert_metric("disk:pve1:/:ro"))
+        self.assertIsNone(alert_metric("bk:100"))
+
+    def test_overview_alert_has_spark(self):
+        from common import ALERTS, Clock, payload, reset
+        from luxmon.ingest import ingest
+        from luxmon.queries import overview
+        reset()
+        with Clock() as c:
+            for _ in range(8):
+                c.advance(60)
+                ingest(payload(now=c.now, metrics={"cpu": 99}))
+                ALERTS.evaluate()
+            a = next(x for x in overview()["alerts"] if x["key"] == "cpu:n1")
+        self.assertEqual((a["host"], a["metric"], a["unit"]), ("n1", "cpu", "%"))
+        self.assertGreaterEqual(len(a["spark"]), 5)

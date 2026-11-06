@@ -11,14 +11,20 @@ from .alerts import ALERTS
 from .queries import alert_history, overview
 
 
+LV_ICON = {"crit": "🔴", "warn": "🟡", "info": "🔵"}
+
+
 def status_text():
     """Короткая сводка текущего состояния для /status и утреннего отчёта."""
     d = overview()
     lines = []
-    live = [a for a in d["alerts"] if not a["muted"]]
+    live = [a for a in d["alerts"] if not a["muted"] and a["level"] != "info"]
+    odd = [a for a in d["alerts"] if not a["muted"] and a["level"] == "info"]
     lines.append("✅ Всё в порядке" if not live else
                  f"⚠️ Проблем: {len(live)}\n" + "\n".join(("🔴 " if a["level"] == "crit" else "🟡 ") + a["msg"]
                                                        for a in live[:10]))
+    if odd:
+        lines.append(f"🔵 Необычное (выше обычного для этого часа): {len(odd)}")
     hosts = d["hosts"]
     up = [h for h in hosts if h["age"] <= rules()["host_down_sec"]]
     lines.append(f"\nХосты: {len(up)}/{len(hosts)} в сети")
@@ -59,7 +65,7 @@ def morning_summary():
         out.append(f"Алертов за сутки: {len(rows)} (критичных {crit})")
         for key, lvl, msg, start, end in rows[-8:]:
             dur = fmt_dur((end or now) - start)
-            out.append(f"  {'🔴' if lvl == 'crit' else '🟡'} {msg} — {dur}{'' if end else ', ещё идёт'}")
+            out.append(f"  {LV_ICON.get(lvl, '🟡')} {msg} — {dur}{'' if end else ', ещё идёт'}")
     else:
         out.append("Алертов за сутки не было")
     c = {k: json.loads(v) for k, v in S.q("SELECT kind, data FROM cluster")}
@@ -138,7 +144,7 @@ def weekly_report():
         crit = sum(1 for a in hist["items"] if a["level"] == "crit")
         out.append(f"Алертов за неделю: {n} (критичных {crit}), чаще всего:")
         for a in hist["summary"][:5]:
-            out.append(f"  {'🔴' if a['level'] == 'crit' else '🟡'} {a['msg']} — ×{a['count']}, всего {fmt_dur(a['total'])}")
+            out.append(f"  {LV_ICON.get(a['level'], '🟡')} {a['msg']} — ×{a['count']}, всего {fmt_dur(a['total'])}")
     else:
         out.append("Алертов за неделю не было 🎉")
     growth = []
