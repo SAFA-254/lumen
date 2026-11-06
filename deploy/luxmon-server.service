@@ -1,0 +1,23 @@
+[Unit]
+Description=Luxmon monitoring server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/luxmon/luxmon-server.py
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=200M
+# Серверу root не нужен: свой пользователь, право только на порты ниже 1024, писать можно лишь в базу
+User=luxmon
+Group=luxmon
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/luxmon
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

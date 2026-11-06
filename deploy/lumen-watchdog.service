@@ -1,8 +1,0 @@
-[Unit]
-Description=Lumen watchdog: alert in Telegram if Lumen is down
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /opt/lumen/lumen-watchdog.py
-TimeoutStartSec=120

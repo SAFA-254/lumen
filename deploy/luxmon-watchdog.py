@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Сторож Lumen: запускается таймером раз в минуту на узле, где Lumen НЕ живёт (pve1).
+"""Сторож Luxmon: запускается таймером раз в минуту на другой машине, не там, где живёт сервер Luxmon.
 Если сервер не отвечает или перестал получать данные от агентов дольше DOWN_AFTER секунд,
-пишет в Telegram; напоминает раз в REMIND секунд; сообщает, когда Lumen снова работает.
+пишет в Telegram; напоминает раз в REMIND секунд; сообщает, когда Luxmon снова работает.
 
-Lumen со своей стороны следит за pve1 (агент на pve1), так что они страхуют друг друга."""
+Luxmon со своей стороны следит за этой машиной (на ней стоит агент), так что они страхуют друг друга.
+Адрес сервера берётся из LUXMON_HEALTH_URL, иначе из конфигурации агента на этой машине."""
 import json
 import os
 import ssl
@@ -12,10 +13,18 @@ import sys
 import time
 import urllib.request
 
-URL = os.environ.get("LUMEN_HEALTH_URL", "https://192.168.3.7/api/health")
-CA = os.environ.get("LUMEN_CA", "/etc/lumen/server.crt")
-NOTIFY = os.environ.get("LUMEN_NOTIFY", "/root/tg-notify.sh")
-STATE = "/var/lib/lumen-watchdog/state.json"
+
+def health_url():
+    if os.environ.get("LUXMON_HEALTH_URL"):
+        return os.environ["LUXMON_HEALTH_URL"]
+    with open(os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")) as f:
+        return json.load(f)["server"].rstrip("/") + "/api/health"
+
+
+URL = health_url()
+CA = os.environ.get("LUXMON_CA", "/etc/luxmon/server.crt")
+NOTIFY = os.environ.get("LUXMON_NOTIFY", "/root/tg-notify.sh")
+STATE = "/var/lib/luxmon-watchdog/state.json"
 DOWN_AFTER = 180      # сколько терпеть, прежде чем писать
 STALE_PUSH = 180      # сервер отвечает, но данные от агентов старше этого — тоже проблема
 REMIND = 2 * 3600
@@ -53,12 +62,12 @@ def main():
         since = time.strftime("%H:%M", time.localtime(st["since"]))
         if down >= DOWN_AFTER and now - st.get("notified", 0) >= REMIND:
             first = "notified" not in st
-            notify(("🔴 Lumen недоступен" if first else "🔴 Lumen всё ещё недоступен") +
+            notify(("🔴 Luxmon недоступен" if first else "🔴 Luxmon всё ещё недоступен") +
                    f" с {since}: {problem}. Алерты кластера сейчас не приходят. (проверка с {host})")
             st["notified"] = now
     elif st:
         if "notified" in st:
-            notify(f"✅ Lumen снова работает (не работал {int((now - st['since']) // 60)} мин). (проверка с {host})")
+            notify(f"✅ Luxmon снова работает (не работал {int((now - st['since']) // 60)} мин). (проверка с {host})")
         st = {}
     tmp = STATE + ".new"
     with open(tmp, "w") as f:

@@ -1,0 +1,21 @@
+[Unit]
+Description=Luxmon monitoring agent
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/luxmon/luxmon-agent.py
+Restart=always
+RestartSec=10
+Nice=10
+# Сюда считается и кэш журнала от journalctl: при 100M код агента вытеснялся и читался с диска по кругу
+MemoryMax=300M
+MemorySwapMax=0
+# Агент работает от root (smartctl, ceph, pvesh, запросы к PostgreSQL от имени postgres),
+# но системные каталоги и домашние папки ему доступны только на чтение
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

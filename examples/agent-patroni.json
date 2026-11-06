@@ -13,5 +13,5 @@
     "http://192.168.3.32:2379",
     "http://192.168.3.8:2379"
   ],
-  "ca_file": "/etc/lumen/server.crt"
+  "ca_file": "/etc/luxmon/server.crt"
 }

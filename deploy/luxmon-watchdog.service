@@ -1,0 +1,8 @@
+[Unit]
+Description=Luxmon watchdog: alert in Telegram if Luxmon is down
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/luxmon/luxmon-watchdog.py
+TimeoutStartSec=120

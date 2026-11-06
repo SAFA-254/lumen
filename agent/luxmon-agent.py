@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lumen agent: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
+"""Alpha Luxmon, агент: собирает метрики хоста (и по желанию Proxmox, Ceph, Patroni/etcd, бэкапы,
 проверки сервисов, входы по SSH, статистику PostgreSQL, SMART дисков, ошибки журнала) и отправляет их на сервер.
 Только стандартная библиотека Python."""
 import base64
@@ -21,7 +21,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-CONFIG_PATH = os.environ.get("LUMEN_AGENT_CONFIG", "/etc/lumen/agent.json")
+VERSION = "2026.11.02"  # видна в панели на странице агентов
+CONFIG_PATH = os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")
 CFG = {
     "server": "http://127.0.0.1:8095",
     "token": "",
@@ -42,7 +43,7 @@ CFG = {
     "updates_interval": 21600,
     "pbs_interval": 600,
     "clock_interval": 300,
-    "ca_file": "",            # сертификат сервера Lumen для проверки HTTPS
+    "ca_file": "",            # сертификат сервера Luxmon для проверки HTTPS
 }
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH) as f:
@@ -129,7 +130,13 @@ def memory():
 
 def disks():
     out, seen = [], set()
-    for line in read("/proc/mounts").splitlines():
+    # монтирования глазами системы, а не агента: systemd (ProtectSystem) показывает агенту /boot и /usr
+    # только для чтения, и по /proc/mounts они выглядели бы как отказ диска
+    try:
+        mounts = read("/proc/1/mounts")
+    except OSError:
+        mounts = read("/proc/mounts")
+    for line in mounts.splitlines():
         dev, mnt, fs, opts = line.split()[:4]
         if fs not in REAL_FS or dev in seen or mnt.startswith(("/var/lib/docker", "/snap")):
             continue
@@ -260,6 +267,8 @@ def info():
         pass
     return {
         "os": osname,
+        "agent": VERSION,
+        "modules": CFG["modules"],
         "kernel": platform.release(),
         "cpus": os.cpu_count(),
         "uptime": float(read("/proc/uptime").split()[0]),
@@ -624,7 +633,7 @@ def check_one(c):
     try:
         if t == "http":
             ctx = ssl._create_unverified_context() if c.get("insecure") else None
-            req = urllib.request.Request(c["url"], headers={"User-Agent": "lumen-check"})
+            req = urllib.request.Request(c["url"], headers={"User-Agent": "luxmon-check"})
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
                     code = r.status
@@ -666,7 +675,7 @@ def check_one(c):
     return res
 
 
-# Список проверок задаётся на сервере (в настройках Lumen); пока сервер его не прислал,
+# Список проверок задаётся на сервере (в настройках Luxmon); пока сервер его не прислал,
 # используется локальный список из agent.json.
 SERVER_CHECKS = None
 
@@ -765,7 +774,7 @@ def ssh_open():
 
 
 JOURNAL = {"cursor": None, "saved": None}
-CURSOR_FILE = "/var/lib/lumen-agent/journal.cursor"
+CURSOR_FILE = "/var/lib/luxmon-agent/journal.cursor"
 
 
 def load_cursor():
