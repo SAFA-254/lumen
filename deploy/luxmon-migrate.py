@@ -70,6 +70,19 @@ def write_new(path, data, mode):
         raise MigrateError(f"{path} появился во время переноса — оставлен как есть, запустите перенос ещё раз")
     finally:
         os.unlink(tmp)
+    fsync_dir(os.path.dirname(path))
+
+
+def fsync_dir(path):
+    """Записать на диск сам каталог: иначе после отключения питания новая ссылка или переименование
+    могут не сохраниться, а последующие — сохраниться, и порядок «отметка, база, итог» нарушится."""
+    if os.name != "posix":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def sync():
@@ -364,16 +377,20 @@ class Migration:
             if os.path.exists(pending):
                 os.unlink(pending)  # от запуска, прерванного до публикации базы
             write_new(pending, (json.dumps(info, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), 0o600)
+            with open(tmp, "r+b") as f:  # на запись: в Windows fsync файла, открытого на чтение, не работает
+                os.fsync(f.fileno())
             try:
                 os.link(tmp, dst)  # не затирает: база могла появиться, пока шло копирование
             except FileExistsError:
                 os.unlink(pending)
                 raise MigrateError(f"{dst} появилась во время переноса — оставлена как есть, копия удалена")
+            fsync_dir(os.path.dirname(dst))
         finally:
             for e in ("", "-journal"):
                 if os.path.exists(tmp + e):
                     os.unlink(tmp + e)
         os.replace(pending, self.p(MARKER))
+        fsync_dir(os.path.dirname(dst))
         print(f"  база перенесена: {sum(rows.values())} строк в {len(rows)} таблицах", flush=True)
 
     def finish_pending(self):
@@ -395,6 +412,7 @@ class Migration:
         finally:
             d.close()
         os.replace(pending, self.p(MARKER))
+        fsync_dir(os.path.dirname(dst))
         print(f"  перенос завершён, резервная копия: {info.get('backup')}", flush=True)
 
 
