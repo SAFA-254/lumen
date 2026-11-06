@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "2026.11.06.1"  # видна в панели на странице агентов
+VERSION = "2026.11.06.2"  # видна в панели на странице агентов
 CONFIG_PATH = os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")
 CFG = {
     "server": "http://127.0.0.1:8095",
@@ -889,7 +889,10 @@ def read_journal():
                 SSH_STATE["pending"].append({"ts": ts, "kind": "fail", "method": m.group(1) or "invalid user",
                                              "user": m.group(2) or m.group(3) or "?", "ip": m.group(4),
                                              "port": int(m.group(5))})
-        if want_logs and str(e.get("PRIORITY", "6")).isdigit() and int(e["PRIORITY"]) <= 3:
+        # PRIORITY есть не у всех записей; без него падал весь проход, а курсор уже сдвинут —
+        # входы по SSH из оставшихся строк терялись
+        prio = str(e.get("PRIORITY", "6"))
+        if want_logs and prio.isdigit() and int(prio) <= 3:
             LOG_STATE["count"] += 1
             r = LOG_STATE["recent"].setdefault((ident, re.sub(r"\d+", "#", msg)[:160]), {"ident": ident, "n": 0})
             r.update(n=r["n"] + 1, last=ts, msg=msg[:300])
