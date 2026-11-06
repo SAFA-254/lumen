@@ -3,6 +3,7 @@
 проверки сервисов, входы по SSH, статистику PostgreSQL, SMART дисков, ошибки журнала) и отправляет их на сервер.
 Только стандартная библиотека Python."""
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -21,7 +22,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "2026.11.02"  # видна в панели на странице агентов
+VERSION = "2026.11.06"  # видна в панели на странице агентов
 CONFIG_PATH = os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")
 CFG = {
     "server": "http://127.0.0.1:8095",
@@ -324,11 +325,17 @@ def self_usage(now):
     cpu_s = t.user + t.system + t.children_user + t.children_system
     ru = resource.getrusage(resource.RUSAGE_CHILDREN)
     io = (ru.ru_inblock + ru.ru_oublock) * 512
-    try:
-        f = dict(l.split(": ") for l in read("/proc/self/io").splitlines())
-        io += int(f["read_bytes"]) + int(f["write_bytes"])
-    except (OSError, KeyError, ValueError):
-        pass
+    # постоянный journalctl ещё не завершился, поэтому в счётчики «детей» не попал — считаем его отдельно
+    jp = JF["proc"]
+    for pid in ("self",) + ((str(jp.pid),) if jp and jp.poll() is None else ()):
+        try:
+            f = dict(l.split(": ") for l in read(f"/proc/{pid}/io").splitlines())
+            io += int(f["read_bytes"]) + int(f["write_bytes"])
+            if pid != "self":
+                st = read(f"/proc/{pid}/stat").rsplit(")", 1)[1].split()
+                cpu_s += (int(st[11]) + int(st[12])) / os.sysconf("SC_CLK_TCK")
+        except (OSError, KeyError, ValueError, IndexError):
+            pass
     # считаем за минуту: команды модулей (pvesh, ceph) запускаются раз в минуту, за 15 с выходили бы пики
     p = SELF.get("prev")
     if not p or now - p[0] >= 60:
@@ -801,38 +808,63 @@ def save_cursor():
         pass
 
 
-def journal(args):
-    r = subprocess.run(["journalctl", "--no-pager", "-q", "--show-cursor"] + args,
-                       capture_output=True, text=True, timeout=20)
-    out = r.stdout.splitlines()
-    cursor = None
-    if out and out[-1].startswith("-- cursor: "):
-        cursor = out.pop()[len("-- cursor: "):]
-    if r.returncode != 0 and not out and "--after-cursor" in args:
-        JOURNAL["cursor"] = None  # курсор устарел (журнал ротирован) — начнём заново с конца
-    return out, cursor
+# Журнал читает один постоянный «journalctl -f»: новые записи он сам отдаёт по мере появления.
+# Раньше journalctl запускался заново каждые 15 с и каждый раз открывал все файлы журнала (на nextcloud-db —
+# 45 файлов, 1 ГБ). Когда Ceph тормозил, запуск не укладывался в 20 с, курсор не сдвигался, и следующий
+# запуск читал то же самое заново: 35 МБ/с чтения по кругу 4 часа подряд (6 ноября 2026).
+JOURNAL_FIELDS = "--output-fields=MESSAGE,PRIORITY,SYSLOG_IDENTIFIER,_COMM"
+JF = {"proc": None, "q": collections.deque(), "dropped": 0, "started": 0, "retry": 0}
+JF_MAX = 20000  # столько записей ждут разбора; если больше (агент долго стоял, журнал сыплет) — старые выбрасываются
+
+
+def jf_reader(proc, q):
+    for line in proc.stdout:
+        if len(q) >= JF_MAX:
+            q.popleft()
+            JF["dropped"] += 1
+        q.append(line)
+
+
+def jf_start(now):
+    cur = JOURNAL["cursor"]
+    args = ["journalctl", "--no-pager", "-q", "-f", "-o", "json", JOURNAL_FIELDS]
+    args += ["--after-cursor", cur] if cur else ["-n", "0"]  # без курсора — с текущего конца журнала
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+    threading.Thread(target=jf_reader, args=(proc, JF["q"]), daemon=True).start()
+    JF.update(proc=proc, started=now)
+
+
+def journal_lines(now):
+    """Записи, пришедшие с прошлого вызова. Если journalctl завершился — перезапуск, но не чаще раза в минуту."""
+    proc = JF["proc"]
+    if proc is not None and proc.poll() is not None:
+        if proc.returncode > 0 and now - JF["started"] < 30 and JOURNAL["cursor"]:
+            JOURNAL["cursor"] = None  # сразу вышел с ошибкой — курсор устарел (журнал ротирован), начнём с конца
+        JF["proc"], JF["retry"] = None, now + 60
+    if JF["proc"] is None and now >= JF["retry"]:
+        try:
+            jf_start(now)
+        except OSError as e:
+            JF["retry"] = now + 60
+            print(f"journalctl: {e}", file=sys.stderr, flush=True)
+    q, lines = JF["q"], []
+    while q:
+        lines.append(q.popleft())
+    return lines
 
 
 def read_journal():
-    """Все новые записи журнала с прошлого вызова — одним проходом для модулей ssh и logs.
-    Без фильтров: тогда курсор сдвигается всегда. С фильтром (-t sshd, -p 3) при отсутствии
-    подходящих записей курсор не выдаётся, и каждый следующий вызов заново перечитывал журнал
-    с прежнего места — в VM с диском в Ceph это давало ~15 МБ/с чтения по сети."""
+    """Все новые записи журнала с прошлого вызова — одним проходом для модулей ssh и logs."""
     now = time.time()
-    if JOURNAL["cursor"] is None:
-        _, JOURNAL["cursor"] = journal(["-n", "0"])  # начинаем с текущего конца журнала
-        LOG_STATE["ts"] = now
-        return
-    lines, cursor = journal(["--after-cursor", JOURNAL["cursor"], "-o", "json", "-n", "5000",
-                             "--output-fields=MESSAGE,PRIORITY,SYSLOG_IDENTIFIER,_COMM"])
-    if cursor:
-        JOURNAL["cursor"] = cursor
+    lines = journal_lines(now)
     want_ssh, want_logs = "ssh" in CFG["modules"], "logs" in CFG["modules"]
     for line in lines:
         try:
             e = json.loads(line)
         except ValueError:
             continue
+        if e.get("__CURSOR"):
+            JOURNAL["cursor"] = e["__CURSOR"]
         msg = e.get("MESSAGE")
         if isinstance(msg, list):  # journald отдаёт не-UTF8 сообщения массивом байт
             msg = bytes(msg).decode(errors="replace")
@@ -922,7 +954,7 @@ LOG_WINDOW = 3600
 
 def mod_logs():
     """Ошибки (priority err и выше) в журнале: скорость в минуту и самые частые за последний час."""
-    first = JOURNAL["cursor"] is None
+    first = JF["proc"] is None
     read_journal()
     if first:
         return None
