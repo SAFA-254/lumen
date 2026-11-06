@@ -117,7 +117,8 @@ class FullMigration(Base):
     def test_everything_moved_and_old_kept(self):
         units = self.old_install()
         src = self.make_db()
-        has_wal = os.path.getsize(src + "-wal") > 0
+        # до Python 3.12 нет setconfig: при закрытии журнал вливается в базу, и -wal может не остаться
+        has_wal = os.path.exists(src + "-wal") and os.path.getsize(src + "-wal") > 0
         m = Fake(False, self.root, units, procs=["1 python3 /opt/lumen/lumen-server.py"])
         m.run()
 
