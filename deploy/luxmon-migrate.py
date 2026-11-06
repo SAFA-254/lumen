@@ -36,6 +36,7 @@ STATE_DIRS = (("/var/lib/lumen-agent", "/var/lib/luxmon-agent"), ("/var/lib/lume
 OLD_DB = "/var/lib/lumen/lumen.db"   # по умолчанию в прежнем сервере; в server.json мог быть задан свой
 NEW_DB = "/var/lib/luxmon/luxmon.db"
 MARKER = "/var/lib/luxmon/.migrated-from-lumen"
+PENDING = MARKER + ".pending"  # база уже на месте, отметки о завершении ещё нет
 DB_EXT = ("", "-wal", "-shm")
 ACTIVE = ("active", "activating", "deactivating", "reloading")
 ENABLED = ("enabled", "enabled-runtime", "linked", "linked-runtime", "alias")
@@ -192,10 +193,7 @@ class Migration:
             raw = f.read()
         notes = []
         if name.endswith(".json"):
-            try:
-                cfg = json.loads(raw.decode("utf-8"))
-            except ValueError as e:
-                raise MigrateError(f"{src} — не JSON ({e}), исправьте или перенесите вручную")
+            cfg = self.read_json(src)
 
             def walk(v, where):
                 if isinstance(v, dict):
@@ -247,15 +245,27 @@ class Migration:
         return steps
 
     # ---- база сервера
-    def old_db_path(self):
+    def read_json(self, path):
         try:
-            with open(self.p(OLD_ETC + "/server.json")) as f:
-                db = json.load(f).get("db")
-            if isinstance(db, str) and db:
-                return self.p(db)
-        except (OSError, ValueError, AttributeError):
-            pass
-        return self.p(OLD_DB)
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except ValueError as e:
+            raise MigrateError(f"{path} — не JSON ({e}), исправьте или перенесите вручную")
+        if not isinstance(cfg, dict):
+            raise MigrateError(f"{path}: ожидался объект JSON")
+        return cfg
+
+    def config_db(self, path, default):
+        """Путь к базе из server.json. Не угадываем: при неверном значении перенесли бы не ту базу."""
+        if not os.path.exists(path):
+            return default
+        db = self.read_json(path).get("db", default)
+        if not isinstance(db, str) or not db.startswith("/"):
+            raise MigrateError(f'{path}: "db" должен быть абсолютным путём, сейчас {db!r} — исправьте и запустите снова')
+        return db
+
+    def old_db_path(self):
+        return self.p(self.config_db(self.p(OLD_ETC + "/server.json"), OLD_DB))
 
     @staticmethod
     def db_mtime(src):
@@ -266,6 +276,12 @@ class Migration:
         src, dst = self.old_db_path(), self.p(NEW_DB)
         if not os.path.exists(src):
             return None
+        # если /etc/luxmon/server.json уже есть, перенос его не меняет: сервер будет искать базу там, где сказано в нём
+        target = self.config_db(self.p(NEW_ETC + "/server.json"), NEW_DB)
+        if target != NEW_DB:
+            raise MigrateError(f"в {self.p(NEW_ETC + '/server.json')} db = {target}, а база переносится в {NEW_DB} "
+                               f"(сервер Luxmon может писать только в {os.path.dirname(NEW_DB)}). "
+                               f'Уберите "db" или укажите {NEW_DB} и запустите снова')
         marker = self.p(MARKER)
         if os.path.exists(marker):
             with open(marker) as f:
@@ -277,6 +293,9 @@ class Migration:
                     f"отложите базу Luxmon (mv {os.path.dirname(dst)} {os.path.dirname(dst)}.old-ДАТА) и запустите снова")
             return None  # уже перенесена
         existing = [dst + e for e in DB_EXT if os.path.exists(dst + e)]
+        if os.path.exists(dst) and os.path.exists(self.p(PENDING)):
+            # прошлый запуск положил базу, но не успел записать отметку: это наша копия — проверяем её, а не делаем заново
+            return (f"завершить прерванный перенос: проверить {dst} и записать отметку", self.finish_pending)
         if existing:
             raise MigrateError(
                 f"в {os.path.dirname(dst)} уже есть база ({', '.join(existing)}), её не затираю. Если Luxmon уже работает "
@@ -337,18 +356,46 @@ class Migration:
                 d.close()
                 s.close()
             os.chmod(tmp, 0o600)
+            # отметка «база опубликована, перенос не закончен» — до публикации: если прервёмся сразу после неё,
+            # повторный запуск узнает свою копию и проверит её, а не остановится на «уже есть база»
+            info = {"source": src, "backup": backup, "migrated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "source_mtime": self.db_mtime(src), "rows": rows}
+            pending = self.p(PENDING)
+            if os.path.exists(pending):
+                os.unlink(pending)  # от запуска, прерванного до публикации базы
+            write_new(pending, (json.dumps(info, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), 0o600)
             try:
                 os.link(tmp, dst)  # не затирает: база могла появиться, пока шло копирование
             except FileExistsError:
+                os.unlink(pending)
                 raise MigrateError(f"{dst} появилась во время переноса — оставлена как есть, копия удалена")
         finally:
             for e in ("", "-journal"):
                 if os.path.exists(tmp + e):
                     os.unlink(tmp + e)
-        info = {"source": src, "backup": backup, "migrated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "source_mtime": self.db_mtime(src), "rows": rows}
-        write_new(self.p(MARKER), (json.dumps(info, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), 0o600)
+        os.replace(pending, self.p(MARKER))
         print(f"  база перенесена: {sum(rows.values())} строк в {len(rows)} таблицах", flush=True)
+
+    def finish_pending(self):
+        pending, dst = self.p(PENDING), self.p(NEW_DB)
+        with open(pending, encoding="utf-8") as f:
+            info = json.load(f)
+        d = sqlite3.connect(dst)
+        try:
+            check = d.execute("PRAGMA integrity_check").fetchone()[0]
+            if check != "ok":
+                raise MigrateError(f"{dst} после прерванного переноса не прошла integrity_check: {check}. "
+                                   f"Отложите её (mv {dst} {dst}.bad) и запустите снова — старая база не тронута")
+            for t, n in info.get("rows", {}).items():
+                q = 'SELECT COUNT(*) FROM "' + t.replace('"', '""') + '"'
+                got = d.execute(q).fetchone()[0]
+                if got < n:  # больше — можно: сервер мог успеть поработать с базой
+                    raise MigrateError(f"{dst}: в таблице {t} {got} строк, а перенесено было {n}. "
+                                       f"Отложите её (mv {dst} {dst}.bad) и запустите снова")
+        finally:
+            d.close()
+        os.replace(pending, self.p(MARKER))
+        print(f"  перенос завершён, резервная копия: {info.get('backup')}", flush=True)
 
 
 def main(argv=None):

@@ -232,6 +232,79 @@ class Safety(Base):
         self.assertEqual(m.calls, [])
 
 
+class DbPath(Base):
+    def test_relative_db_stops_before_any_change(self):
+        self.write("/etc/lumen/server.json", {"token": "t", "db": "lumen.db"})
+        self.make_db()
+        m = Fake(False, self.root, {"lumen-server.service": running()})
+        with self.assertRaisesRegex(mig.MigrateError, "абсолютным"):
+            m.run()
+        self.assertEqual(m.calls, [])
+
+    def test_non_string_db_stops(self):
+        self.write("/etc/lumen/server.json", {"token": "t", "db": 5})
+        with self.assertRaisesRegex(mig.MigrateError, "абсолютным"):
+            Fake(False, self.root, {"lumen-server.service": running()}).run()
+
+    def test_existing_new_config_points_elsewhere(self):
+        """/etc/luxmon/server.json перенос не перезаписывает — значит, база должна оказаться там, где он её ищет."""
+        units = self.old_install()
+        self.make_db()
+        self.write("/etc/luxmon/server.json", {"token": "t", "db": "/var/lib/luxmon/other.db"})
+        before = self.tree()
+        m = Fake(False, self.root, units)
+        with self.assertRaisesRegex(mig.MigrateError, "other.db"):
+            m.run()
+        self.assertEqual(m.calls, [])
+        self.assertEqual(self.tree(), before)
+
+
+class Interrupted(Base):
+    def test_after_db_published_before_marker(self):
+        units = self.old_install()
+        self.make_db()
+        real_replace = os.replace
+
+        def crash(a, b):
+            if b.endswith(".migrated-from-lumen"):
+                raise KeyboardInterrupt  # питание пропало между публикацией базы и отметкой
+            return real_replace(a, b)
+        with mock.patch.object(mig.os, "replace", crash):
+            with self.assertRaises(KeyboardInterrupt):
+                Fake(False, self.root, units).run()
+        self.assertTrue(os.path.exists(self.path(mig.NEW_DB)))
+        self.assertFalse(os.path.exists(self.path(mig.MARKER)))
+
+        Fake(False, self.root, units).run()  # повтор не упирается в «уже есть база»
+        self.assertTrue(os.path.exists(self.path(mig.MARKER)))
+        self.assertFalse(os.path.exists(self.path(mig.PENDING)))
+        c = sqlite3.connect(self.path(mig.NEW_DB))
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM raw").fetchone()[0], 500)
+        c.close()
+        Fake(False, self.root, units).run()  # и третий раз — ничего не делает
+
+    def test_published_copy_with_missing_rows_is_not_accepted(self):
+        units = self.old_install()
+        self.make_db()
+        self.write(mig.PENDING, {"rows": {"raw": 500}})
+        c = sqlite3.connect(self.path(mig.NEW_DB))
+        c.execute("CREATE TABLE raw(host TEXT, v REAL)")
+        c.commit()
+        c.close()
+        with self.assertRaisesRegex(mig.MigrateError, "0 строк"):
+            Fake(False, self.root, units).run()
+        self.assertFalse(os.path.exists(self.path(mig.MARKER)))
+
+    def test_stale_pending_without_db(self):
+        """Прервались до публикации: отметка «в процессе» есть, базы нет — перенос делается заново."""
+        units = self.old_install()
+        self.make_db()
+        self.write(mig.PENDING, {"rows": {}})
+        Fake(False, self.root, units).run()
+        self.assertTrue(os.path.exists(self.path(mig.MARKER)))
+        self.assertFalse(os.path.exists(self.path(mig.PENDING)))
+
+
 class Rerun(Base):
     def test_second_run_does_nothing(self):
         units = self.old_install()
