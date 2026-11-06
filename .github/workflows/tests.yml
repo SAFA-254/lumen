@@ -1,0 +1,31 @@
+# Тесты на каждый PR и push в main. Только стандартная библиотека — ставить нечего.
+# На Linux проходят и тесты HostTokens, которые в Windows пропускаются (нужен os.geteuid).
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 — Debian 12 / Proxmox VE 8 на хостах; 3.13 — Debian 13 / Proxmox VE 9
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Синтаксис скриптов
+        run: |
+          python -m py_compile agent/luxmon-agent.py deploy/*.py server/luxmon-server.py server/tg-notify.py server/luxmon/*.py
+          for f in install.sh deploy/*.sh; do bash -n "$f"; done
+      - name: Тесты
+        run: python -m unittest discover tests -v

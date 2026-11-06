@@ -32,7 +32,7 @@ cd tests && python3 -m unittest test_ingest.Ingest.test_name   # exact test; tes
 - `tests/common.py` must be imported before any `luxmon` module: the server reads its config at import time, so `common` writes a temp `server.json`, sets `LUXMON_CONFIG`/`LUXMON_TG_ENV` and puts `server/` on `sys.path`. It also provides `reset()` (empties all tables and in-memory alert/ingest state, captures notifications into a list), `Clock` (patches `time.time`) and `payload()` (a minimal agent push). New tables or module-level caches must be added to `reset()`.
 - `test_http.py` starts the real server as a subprocess on a free port and talks to it over HTTP; it also calls the `token` CLI.
 - On Windows two `test_http.HostTokens` tests are skipped (`needs_geteuid`): the `token` command calls `os.geteuid()`, which is Linux-only. On Linux nothing is skipped.
-- There is no linter or CI. The agent has no tests and reads Linux `/proc`, `/sys`, `journalctl`, `pvesh`, `ceph`, `smartctl` etc.; at least `python3 -m py_compile agent/luxmon-agent.py` after changing it.
+- CI (`.github/workflows/tests.yml`, GitHub Actions on Ubuntu, Python 3.11 and 3.13) runs on every PR and push to `main`: `py_compile` of all scripts, `bash -n` of the shell scripts, then the full suite. A PR with a red CI is not merged. There is no linter. The agent has no tests and reads Linux `/proc`, `/sys`, `journalctl`, `pvesh`, `ceph`, `smartctl` etc.; at least `python3 -m py_compile agent/luxmon-agent.py` after changing it.
 
 ## Running locally
 
