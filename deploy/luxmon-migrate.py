@@ -156,13 +156,34 @@ class Migration:
         steps.append(("проверить, что процессы Lumen завершились и службы отключены", self.wait_stopped))
         steps += copies
 
-        for msg, fn in steps:
-            print(("[dry-run] будет: " if self.dry else "") + msg, flush=True)
-            if not self.dry:
+        if self.dry:
+            for msg, _ in steps:
+                print("[dry-run] будет: " + msg, flush=True)
+            return
+        try:
+            for msg, fn in steps:
+                print(msg, flush=True)
                 fn()
+        except BaseException:
+            # Luxmon здесь ещё не установлен: без старых служб хост остался бы совсем без мониторинга
+            self.restore(states)
+            raise
         if not self.dry:
             sync()
             print("Готово. Старые юниты и каталоги (/opt/lumen, /etc/lumen, /var/lib/lumen*) оставлены для отката")
+
+    def restore(self, states):
+        """Вернуть старые службы в то состояние, в котором они были до переноса."""
+        for u in reversed(UNITS):  # сервер раньше агента, таймер сторожа последним
+            s, now = states[u], self.unit_state(u)
+            try:
+                if s.get("UnitFileState") in ENABLED and now.get("UnitFileState") not in ENABLED:
+                    self.systemctl("enable", u)
+                if s.get("ActiveState") in ACTIVE and now.get("ActiveState") not in ACTIVE:
+                    self.systemctl("start", u)
+            except MigrateError as e:
+                print(f"не удалось вернуть {u}: {e}", file=sys.stderr, flush=True)
+        print("перенос не закончен, старые службы Lumen снова запущены", file=sys.stderr, flush=True)
 
     def wait_stopped(self):
         deadline = time.time() + self.STOP_WAIT
@@ -247,7 +268,10 @@ class Migration:
             dmode = os.stat(o).st_mode & 0o777
             for name in sorted(os.listdir(o)):
                 src, dst = os.path.join(o, name), os.path.join(n, name)
-                if os.path.lexists(dst) or not os.path.isfile(src) or name.endswith((".tmp", ".migrate-tmp")):
+                if os.path.lexists(dst) or name.endswith((".tmp", ".migrate-tmp")):
+                    continue
+                if not os.path.isfile(src):
+                    print(f"пропущен {src}: не обычный файл, перенесите вручную, если нужен", file=sys.stderr)
                     continue
 
                 def copy(src=src, dst=dst, n=n, dmode=dmode):
@@ -281,9 +305,11 @@ class Migration:
         return self.p(self.config_db(self.p(OLD_ETC + "/server.json"), OLD_DB))
 
     @staticmethod
-    def db_mtime(src):
-        # -shm меняется и при чтении, поэтому смотрим только на саму базу и журнал
-        return max((os.stat(src + e).st_mtime for e in ("", "-wal") if os.path.exists(src + e)), default=0)
+    def db_state(src):
+        """Размер и время изменения базы и журнала с точностью до наносекунд: любая запись в старую базу
+        меняет хотя бы одно из них. -shm не берём — он меняется и при чтении."""
+        return [[e, os.stat(src + e).st_size, os.stat(src + e).st_mtime_ns]
+                for e in ("", "-wal") if os.path.exists(src + e)]
 
     def plan_db(self):
         src, dst = self.old_db_path(), self.p(NEW_DB)
@@ -299,7 +325,7 @@ class Migration:
         if os.path.exists(marker):
             with open(marker) as f:
                 m = json.load(f)
-            if self.db_mtime(src) > m.get("source_mtime", 0) + 1:
+            if self.db_state(src) != m.get("source_state"):
                 raise MigrateError(
                     f"база {src} менялась после переноса {m.get('migrated', '')} (был откат на Lumen?). Повторный перенос "
                     f"затёр бы данные, собранные Luxmon, поэтому остановлено. Если нужна именно старая база, "
@@ -372,7 +398,7 @@ class Migration:
             # отметка «база опубликована, перенос не закончен» — до публикации: если прервёмся сразу после неё,
             # повторный запуск узнает свою копию и проверит её, а не остановится на «уже есть база»
             info = {"source": src, "backup": backup, "migrated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "source_mtime": self.db_mtime(src), "rows": rows}
+                    "source_state": self.db_state(src), "rows": rows}
             pending = self.p(PENDING)
             if os.path.exists(pending):
                 os.unlink(pending)  # от запуска, прерванного до публикации базы
@@ -397,6 +423,11 @@ class Migration:
         pending, dst = self.p(PENDING), self.p(NEW_DB)
         with open(pending, encoding="utf-8") as f:
             info = json.load(f)
+        src = self.old_db_path()
+        if self.db_state(src) != info.get("source_state"):
+            # после сбоя старый сервер снова запущен и пишет в свою базу: копия устарела
+            raise MigrateError(f"{src} менялась после копирования, копия {dst} устарела. Отложите её "
+                               f"(mv {dst} {dst}.old; rm {self.p(PENDING)}) и запустите снова")
         d = sqlite3.connect(dst)
         try:
             check = d.execute("PRAGMA integrity_check").fetchone()[0]

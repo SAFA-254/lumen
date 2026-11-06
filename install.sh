@@ -75,6 +75,7 @@ migrate_vm() { # vmid [--dry-run]
   sum=$(guest $node $vmid 'cat > /tmp/luxmon-migrate.py && sha256sum /tmp/luxmon-migrate.py' deploy/luxmon-migrate.py | cut -d' ' -f1)
   if [ "$sum" != "$(sha256sum deploy/luxmon-migrate.py | cut -d' ' -f1)" ]; then
     echo "VM $vmid: скрипт переноса не дошёл до гостя целиком" >&2
+    guest $node $vmid 'rm -f /tmp/luxmon-migrate.py' || true
     return 1
   fi
   guest $node $vmid "python3 /tmp/luxmon-migrate.py $*; rc=\$?; rm -f /tmp/luxmon-migrate.py; exit \$rc"

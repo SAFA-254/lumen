@@ -35,6 +35,10 @@ class Fake(mig.Migration):
         if action == "stop":
             self.units[unit]["ActiveState"] = "inactive"
             self.procs = []
+        if action == "enable":
+            self.units[unit]["UnitFileState"] = "enabled"
+        if action == "start":
+            self.units[unit]["ActiveState"] = "active"
 
     def old_processes(self):
         return self.procs
@@ -285,8 +289,8 @@ class Interrupted(Base):
 
     def test_published_copy_with_missing_rows_is_not_accepted(self):
         units = self.old_install()
-        self.make_db()
-        self.write(mig.PENDING, {"rows": {"raw": 500}})
+        src = self.make_db()
+        self.write(mig.PENDING, {"rows": {"raw": 500}, "source_state": mig.Migration.db_state(src)})
         c = sqlite3.connect(self.path(mig.NEW_DB))
         c.execute("CREATE TABLE raw(host TEXT, v REAL)")
         c.commit()
@@ -303,6 +307,47 @@ class Interrupted(Base):
         Fake(False, self.root, units).run()
         self.assertTrue(os.path.exists(self.path(mig.MARKER)))
         self.assertFalse(os.path.exists(self.path(mig.PENDING)))
+
+
+class Restore(Base):
+    def test_failure_after_stop_brings_lumen_back(self):
+        """Копирование упало, когда старые службы уже остановлены: Luxmon здесь ещё не установлен,
+        поэтому Lumen запускается снова, а не оставляет хост без мониторинга."""
+        units = self.old_install()
+        self.make_db()
+        m = Fake(False, self.root, units)
+
+        def broken():
+            raise OSError("диск отвалился")
+        m.copy_db = broken
+        with self.assertRaises(OSError):
+            m.run()
+        for u in ("lumen-server.service", "lumen-agent.service", "lumen-watchdog.timer"):
+            self.assertEqual(m.units[u]["ActiveState"], "active", u)
+            self.assertEqual(m.units[u]["UnitFileState"], "enabled", u)
+        self.assertEqual(m.units["lumen-watchdog.service"]["UnitFileState"], "static")
+        self.assertLess(m.calls.index(("start", "lumen-server.service")), m.calls.index(("start", "lumen-agent.service")))
+
+    def test_restarted_lumen_makes_published_copy_stale(self):
+        units = self.old_install()
+        src = self.make_db()
+        real_replace = os.replace
+
+        def crash(a, b):
+            if b.endswith(".migrated-from-lumen"):
+                raise OSError("сбой")
+            return real_replace(a, b)
+        m = Fake(False, self.root, units)
+        with mock.patch.object(mig.os, "replace", crash):
+            with self.assertRaises(OSError):
+                m.run()
+        self.assertEqual(m.units["lumen-server.service"]["ActiveState"], "active")
+        c = sqlite3.connect(src)  # вернувшийся Lumen пишет в свою базу
+        c.execute("INSERT INTO meta VALUES('x','y')")
+        c.commit()
+        c.close()
+        with self.assertRaisesRegex(mig.MigrateError, "устарела"):
+            Fake(False, self.root, m.units).run()
 
 
 class Rerun(Base):
@@ -328,6 +373,15 @@ class Rerun(Base):
         with self.assertRaisesRegex(mig.MigrateError, "менялась после переноса"):
             Fake(False, self.root, units).run()
         self.assertEqual(self.tree()[os.path.relpath(self.path(mig.NEW_DB), self.root)], new_before)
+
+    def test_old_db_changed_within_same_second(self):
+        units = self.old_install()
+        src = self.make_db()
+        Fake(False, self.root, units).run()
+        st = os.stat(src)
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 1000))
+        with self.assertRaisesRegex(mig.MigrateError, "менялась после переноса"):
+            Fake(False, self.root, units).run()
 
     def test_nothing_to_migrate(self):
         m = Fake(False, self.root)
