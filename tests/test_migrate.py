@@ -29,6 +29,8 @@ class Fake(mig.Migration):
 
     def systemctl(self, *args):
         self.calls.append(args)
+        if len(args) == 1:  # daemon-reload
+            return
         action, unit = args
         if action == "disable":
             self.units[unit]["UnitFileState"] = "disabled"
@@ -53,9 +55,9 @@ class Base(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="luxmon-migrate-")
         self.addCleanup(shutil.rmtree, self.root, True)
         # вывод переноса не нужен в выводе тестов, а консоль Windows не печатает «→»
-        self.out = io.StringIO()
+        self.out, self.err = io.StringIO(), io.StringIO()
         for name in ("stdout", "stderr"):
-            p = mock.patch("sys." + name, io.StringIO() if name == "stderr" else self.out)
+            p = mock.patch("sys." + name, self.err if name == "stderr" else self.out)
             p.start()
             self.addCleanup(p.stop)
 
@@ -117,7 +119,8 @@ class FullMigration(Base):
     def test_everything_moved_and_old_kept(self):
         units = self.old_install()
         src = self.make_db()
-        has_wal = os.path.getsize(src + "-wal") > 0
+        # до Python 3.12 нет setconfig: при закрытии журнал вливается в базу, и -wal может не остаться
+        has_wal = os.path.exists(src + "-wal") and os.path.getsize(src + "-wal") > 0
         m = Fake(False, self.root, units, procs=["1 python3 /opt/lumen/lumen-server.py"])
         m.run()
 
@@ -368,26 +371,261 @@ class Rerun(Base):
         src = self.make_db()
         Fake(False, self.root, units).run()
         new_before = self.tree()[os.path.relpath(self.path(mig.NEW_DB), self.root)]
-        later = os.stat(src).st_mtime + 60
-        os.utime(src, (later, later))
+        c = sqlite3.connect(src)
+        c.execute("INSERT INTO meta VALUES('после','отката')")
+        c.commit()
+        c.close()
         with self.assertRaisesRegex(mig.MigrateError, "менялась после переноса"):
             Fake(False, self.root, units).run()
         self.assertEqual(self.tree()[os.path.relpath(self.path(mig.NEW_DB), self.root)], new_before)
 
-    def test_old_db_changed_within_same_second(self):
+    def test_content_changed_with_same_size_and_mtime(self):
+        """Время изменения можно вернуть прежним (копия из резерва, rsync -t) — сверка идёт по содержимому."""
         units = self.old_install()
         src = self.make_db()
         Fake(False, self.root, units).run()
         st = os.stat(src)
-        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 1000))
+        with open(src, "r+b") as f:
+            f.seek(st.st_size - 100)
+            b = f.read(1)
+            f.seek(st.st_size - 100)
+            f.write(bytes([b[0] ^ 1]))
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(os.path.getsize(src), st.st_size)
         with self.assertRaisesRegex(mig.MigrateError, "менялась после переноса"):
             Fake(False, self.root, units).run()
+
+    def test_touch_without_changes_is_not_a_change(self):
+        units = self.old_install()
+        src = self.make_db()
+        Fake(False, self.root, units).run()
+        later = os.stat(src).st_mtime + 60
+        os.utime(src, (later, later))
+        Fake(False, self.root, units).run()
+
+    def test_warns_when_host_left_unmonitored(self):
+        """Прошлый запуск оборвался без отката (kill -9): Lumen выключен, Luxmon не стоит — об этом надо сказать."""
+        units = self.old_install()
+        self.make_db()
+        Fake(False, self.root, units).run()
+        m = Fake(False, self.root, units)
+        m.run()
+        self.assertIn("без мониторинга", self.err.getvalue())
+        self.assertEqual(m.calls, [])  # старые службы сами не включаются: сейчас install.sh поставит Luxmon
+
+    def test_no_warning_when_luxmon_runs(self):
+        units = self.old_install()
+        Fake(False, self.root, units).run()
+        units["luxmon-agent.service"] = running()
+        Fake(False, self.root, units).run()
+        self.assertNotIn("без мониторинга", self.err.getvalue())
 
     def test_nothing_to_migrate(self):
         m = Fake(False, self.root)
         m.run()
         self.assertEqual(m.calls, [])
         self.assertEqual(self.tree(), {})
+
+
+class Cleanup(Base):
+    def migrated(self, db=True):
+        """Хост после переноса и установки Luxmon: старые юниты отключены, новый агент работает."""
+        units = self.old_install()
+        for u in mig.UNITS:
+            self.write(mig.UNIT_DIR + "/" + u, "[Unit]")
+        for f in ("lumen-server.py", "lumen-agent.py", "tg-notify.py", "web/index.html", "web/login.html", "__pycache__/lumen-agent.cpython-311.pyc"):
+            self.write("/opt/lumen/" + f, "код")
+        self.write("/etc/lumen/server.json", {"token": "t"})
+        if db:
+            self.make_db()
+        Fake(False, self.root, units).run()
+        units["luxmon-agent.service"] = running()
+        return units
+
+    def test_removes_lumen_and_keeps_luxmon(self):
+        units = self.migrated()
+        m = Fake(False, self.root, units)
+        m.cleanup()
+        for d in mig.OLD_DIRS:
+            self.assertFalse(os.path.exists(self.path(d)), d)
+        for u in mig.UNITS:
+            self.assertFalse(os.path.exists(self.path(mig.UNIT_DIR + "/" + u)), u)
+        self.assertIn(("daemon-reload",), m.calls)
+        c = sqlite3.connect(self.path(mig.NEW_DB))
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM raw").fetchone()[0], 500)
+        c.close()
+        self.assertTrue(os.path.exists(self.path("/etc/luxmon/server.json")))
+        self.assertTrue(os.path.exists(self.path("/var/lib/luxmon-agent/journal.cursor")))
+        Fake(False, self.root, {}).cleanup()  # повторно — «удалять нечего»
+        Fake(False, self.root, {}).run()      # и перенос после очистки ничего не делает
+
+    def test_dry_run_changes_nothing(self):
+        units = self.migrated()
+        before = self.tree()
+        m = Fake(True, self.root, units)
+        m.cleanup()
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(m.calls, [])
+        self.assertIn("[dry-run] будет: удалить", self.out.getvalue())
+
+    def refused(self, units, pattern, procs=()):
+        before = self.tree()
+        m = Fake(False, self.root, units, procs=procs)
+        with self.assertRaisesRegex(mig.MigrateError, pattern):
+            m.cleanup()
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(m.calls, [])
+
+    def test_refuses_while_luxmon_not_running(self):
+        units = self.migrated()
+        del units["luxmon-agent.service"]
+        self.refused(units, "Luxmon на этом хосте не запущен")
+
+    def test_refuses_while_lumen_enabled(self):
+        units = self.migrated()
+        units["lumen-agent.service"] = running()
+        self.refused(units, "Lumen ещё включён")
+
+    def test_refuses_when_old_process_left(self):
+        self.refused(self.migrated(), "процесс", procs=["7 python3 /opt/lumen/lumen-agent.py"])
+
+    def test_refuses_when_something_not_migrated(self):
+        units = self.migrated()
+        self.write("/etc/lumen/extra.json", {"a": 1})
+        self.refused(units, "не всё перенесено")
+
+    def test_refuses_when_db_not_migrated(self):
+        units = self.migrated(db=False)
+        self.make_db()
+        self.refused(units, "не перенесена")
+
+    def test_refuses_when_old_db_changed_after_migration(self):
+        units = self.migrated()
+        c = sqlite3.connect(self.path(mig.OLD_DB))
+        c.execute("INSERT INTO meta VALUES('после','отката')")
+        c.commit()
+        c.close()
+        self.refused(units, "менялась после переноса")
+
+    def test_refuses_on_unknown_paths(self):
+        """Каталоги удаляются целиком — всё незнакомое в них останавливает удаление."""
+        for extra in ("/etc/lumen/certs/ca.pem", "/opt/lumen/notes.txt", "/opt/lumen/web/sub/x.js",
+                      "/opt/lumen/web/notes.txt", "/opt/lumen/web/report.js", "/opt/lumen/__pycache__/dump.sql",
+                      "/opt/lumen/__pycache__/other.cpython-311.pyc",
+                      "/var/lib/lumen/other.db", "/var/lib/lumen/backup-old/lumen.db", "/var/lib/lumen/lumen.db-journal",
+                      "/var/lib/lumen/backup-20260101-000000/lumen.db/x", "/var/lib/lumen-agent/sub/x"):
+            with self.subTest(extra=extra):
+                self.clear_root()
+                units = self.migrated()
+                self.write(extra, "нужное")
+                self.refused(units, "чего перенос не знает")
+
+    def test_refuses_when_marker_backup_points_elsewhere(self):
+        """Путь копии берётся из отметки — испорченная отметка не должна направить удаление в чужой каталог."""
+        units = self.migrated()
+        self.write("/srv/data/lumen.db", "чужая база")
+        marker = json.loads(self.read(mig.MARKER))
+        marker["backup"] = self.path("/srv/data")
+        self.write(mig.MARKER, marker)
+        self.refused(units, "не копия переноса")
+        self.assertTrue(os.path.exists(self.path("/srv/data/lumen.db")))
+
+    def test_refuses_on_subdir_even_if_luxmon_has_same_name(self):
+        units = self.migrated()
+        self.write("/var/lib/lumen-agent/custom/data", "нужное")
+        os.makedirs(self.path("/var/lib/luxmon-agent/custom"))
+        self.refused(units, "custom")
+
+    def test_refuses_when_old_dir_is_symlink(self):
+        units = self.migrated()
+        os.makedirs(self.path("/srv/state"))
+        self.write("/srv/state/data", "нужное")
+        try:
+            os.symlink(self.path("/srv/state"), self.path("/var/lib/lumen-watchdog-link"))
+        except (OSError, NotImplementedError):
+            self.skipTest("нет прав на символические ссылки")
+        shutil.rmtree(self.path("/var/lib/lumen-watchdog"))
+        os.rename(self.path("/var/lib/lumen-watchdog-link"), self.path("/var/lib/lumen-watchdog"))
+        self.refused(units, "lumen-watchdog")
+        self.assertTrue(os.path.exists(self.path("/srv/state/data")))
+
+    def test_refuses_on_foreign_file_in_backup(self):
+        units = self.migrated()
+        backup = [d for d in os.listdir(self.path("/var/lib/lumen")) if d.startswith("backup-")][0]
+        self.write(f"/var/lib/lumen/{backup}/my.sql", "дамп")
+        self.refused(units, "my.sql")
+
+    def clear_root(self):
+        for name in os.listdir(self.root):
+            shutil.rmtree(os.path.join(self.root, name))
+
+    def test_custom_db_path_removed_with_its_backup(self):
+        units = self.old_install()
+        self.write("/etc/lumen/server.json", {"token": "t", "db": "/srv/lumen/l.db"})
+        self.make_db("/srv/lumen/l.db", rows=3)
+        self.write("/srv/lumen/other.txt", "чужой файл")
+        Fake(False, self.root, units).run()
+        units["luxmon-agent.service"] = running()
+        Fake(False, self.root, units).cleanup()
+        # рядом с базой вне каталогов Lumen удаляются только её файлы и копия переноса
+        self.assertEqual(os.listdir(self.path("/srv/lumen")), ["other.txt"])
+
+    def test_custom_db_backup_with_foreign_or_replaced_file(self):
+        """Вне каталогов Lumen файлы копии удаляются, только если их sha256 совпадает с записанным при переносе."""
+        for name, data in (("чужой.txt", "x"), ("l.db", "подменили")):
+            with self.subTest(name=name):
+                self.clear_root()
+                units = self.old_install()
+                self.write("/etc/lumen/server.json", {"token": "t", "db": "/srv/lumen/l.db"})
+                self.make_db("/srv/lumen/l.db", rows=3)
+                Fake(False, self.root, units).run()
+                units["luxmon-agent.service"] = running()
+                backup = [d for d in os.listdir(self.path("/srv/lumen")) if d.startswith("backup-")][0]
+                self.write(f"/srv/lumen/{backup}/{name}", data)
+                self.refused(units, "не тот, что сделал перенос")
+
+    def test_refuses_when_luxmon_file_existed_before(self):
+        """Перенос не трогает уже существующий файл Luxmon — значит, старый не скопирован, и он единственная копия."""
+        units = self.old_install()
+        self.write("/etc/luxmon/agent.json", {"server": "https://new", "token": "own"})
+        self.write("/etc/lumen/server.json", {"token": "t"})
+        Fake(False, self.root, units).run()
+        units["luxmon-agent.service"] = running()
+        self.refused(units, "agent.json")
+
+    def test_luxmon_config_edited_after_migration_is_fine(self):
+        units = self.migrated()
+        self.write("/etc/luxmon/server.json", {"token": "t", "users": {"admin": "новый пароль"}})
+        self.write("/var/lib/luxmon-agent/journal.cursor", "s=новый")  # агент Luxmon двигает позицию журнала
+        Fake(False, self.root, units).cleanup()
+        self.assertFalse(os.path.exists(self.path("/etc/lumen")))
+
+    def test_refuses_when_old_config_edited_after_migration(self):
+        units = self.migrated()
+        self.write("/etc/lumen/server.json", {"token": "поменяли после переноса"})
+        self.refused(units, "менялись после переноса")
+
+    def test_unit_drop_ins_kept(self):
+        units = self.migrated()
+        self.write(mig.UNIT_DIR + "/lumen-agent.service.d/override.conf", "[Service]\nEnvironment=X=1\n")
+        Fake(False, self.root, units).cleanup()
+        self.assertFalse(os.path.exists(self.path(mig.UNIT_DIR + "/lumen-agent.service")))
+        self.assertTrue(os.path.exists(self.path(mig.UNIT_DIR + "/lumen-agent.service.d/override.conf")))
+        self.assertIn("оставлен", self.err.getvalue())
+
+    def test_foreign_unit_file_kept(self):
+        units = self.migrated()
+        units["lumen-agent.service"]["FragmentPath"] = self.path("/usr/lib/systemd/system/lumen-agent.service")
+        self.write("/usr/lib/systemd/system/lumen-agent.service", "[Unit]")
+        Fake(False, self.root, units).cleanup()
+        self.assertTrue(os.path.exists(self.path("/usr/lib/systemd/system/lumen-agent.service")))
+        self.assertIn("пропущен lumen-agent.service", self.err.getvalue())
+
+
+class Args(Base):
+    def test_bad_arguments(self):
+        for args in (["--force"], ["--dry-run", "--dry-run"], ["x", "--cleanup"]):
+            self.assertEqual(mig.main(args), 2, args)
 
 
 if __name__ == "__main__":
