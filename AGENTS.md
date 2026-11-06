@@ -15,10 +15,6 @@ Lumen is lightweight monitoring for a small Proxmox VE cluster. Agents on each h
 - Comments explain *why* (edge cases, Proxmox/Ceph quirks), not what.
 - Real configs (`server.json`, `agent.json`, `*.env`, `*.db`, `preview.html`) are gitignored; only `examples/` is tracked.
 
-## Before opening a PR
-
-Before `gh pr create`, run a Codex review of the branch against `main` (`codex review --base main` or the codex plugin script). Fix P1/P2 findings, re-run the review, and only then open the PR. Briefly describe in the PR what Codex found and what was fixed.
-
 ## Running / testing
 
 There is no test suite, linter, or CI. Verify changes by running the pieces locally:
