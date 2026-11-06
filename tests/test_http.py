@@ -159,6 +159,10 @@ class Open(Base):
         self.assertEqual(self.api("GET", "/api/nope")[0], 404)
 
 
+# команда token переходит на владельца базы через os.geteuid(), которого нет в Windows
+needs_geteuid = unittest.skipUnless(hasattr(os, "geteuid"), "нужен os.geteuid (Linux)")
+
+
 class HostTokens(Base):
     """У хоста свой токен: им нельзя прислать данные за другой хост, а общий токен для этого хоста не действует."""
 
@@ -168,6 +172,7 @@ class HostTokens(Base):
         return subprocess.run([sys.executable, os.path.join(SERVER, "luxmon-server.py"), "token", *args],
                               env=env, capture_output=True, text=True, check=True).stdout
 
+    @needs_geteuid
     def test_own_token(self):
         tok = self.cli("add", "n1").strip()
         self.assertTrue(tok.startswith("lxa_"))
@@ -191,6 +196,7 @@ class HostTokens(Base):
         self.assertNotIn("n5", [x["name"] for x in json.loads(self.api("GET", "/api/agents")[2])["agents"]])
         self.assertEqual(self.push({"host": "n5"}, token=tok)[0], 403)
 
+    @needs_geteuid
     def test_replaced_token_stops_working(self):
         old = self.cli("add", "n3").strip()
         new = self.cli("add", "n3").strip()
