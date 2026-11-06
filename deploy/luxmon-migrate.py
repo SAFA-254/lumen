@@ -3,8 +3,10 @@
 до установки нового кода; запускать повторно можно — сделанное второй раз не делается.
 
 Использование:
-  luxmon-migrate.py             перенести
-  luxmon-migrate.py --dry-run   только показать, что будет сделано, и проверить, что перенос возможен
+  luxmon-migrate.py                       перенести
+  luxmon-migrate.py --dry-run             только показать, что будет сделано, и проверить, что перенос возможен
+  luxmon-migrate.py --cleanup [--dry-run] когда откат уже не нужен: удалить юниты и каталоги Lumen
+                                          (только если всё перенесено и Luxmon на хосте работает)
 
 Если на хосте есть следы Lumen:
   1. останавливает и отключает lumen-watchdog.timer, lumen-watchdog, lumen-agent, lumen-server и ждёт,
@@ -14,9 +16,11 @@
   3. копирует состояние агента и сторожа (/var/lib/lumen-agent, /var/lib/lumen-watchdog);
   4. если здесь база сервера: копирует её как есть, вместе с -wal и -shm, в резервную копию с датой,
      затем через SQLite backup API создаёт /var/lib/luxmon/luxmon.db и сверяет число строк в каждой таблице.
-     Если в /var/lib/luxmon уже есть база, ничего не меняет и завершается с ошибкой.
+     Если в /var/lib/luxmon уже есть база, ничего не меняет и завершается с ошибкой. База всегда переезжает
+     в /var/lib/luxmon/luxmon.db, даже если в старом server.json был задан свой "db".
 Все проверки выполняются до первого изменения. Старые юниты, каталоги и база остаются для отката.
 Только стандартная библиотека Python."""
+import hashlib
 import json
 import os
 import re
@@ -41,6 +45,14 @@ DB_EXT = ("", "-wal", "-shm")
 ACTIVE = ("active", "activating", "deactivating", "reloading")
 ENABLED = ("enabled", "enabled-runtime", "linked", "linked-runtime", "alias")
 OLD_DIRS = ("/etc/lumen", "/opt/lumen", "/var/lib/lumen") + tuple(o for o, _ in STATE_DIRS)
+LUXMON_UNITS = ("luxmon-server.service", "luxmon-agent.service", "luxmon-watchdog.timer")
+UNIT_DIR = "/etc/systemd/system"  # сюда юниты Lumen клала его установка
+# точные имена из истории репозитория (server/web до переименования), а не расширения: иначе свой report.js
+# в web/ удалился бы вместе с Lumen
+CODE_DIRS = {"web": re.compile(r"(index|login)\.html"),
+             "__pycache__": re.compile(r"(lumen-[\w-]+|tg-notify)\.cpython-\d+\.pyc")}
+MANIFEST = NEW_ETC + "/.migrated-from-lumen.json"  # какие файлы перенесены и их sha256 в момент копирования
+BACKUP_NAME = re.compile(r"backup-\d{8}-\d{6}")  # каталог резервной копии, который создаёт copy_db
 
 
 class MigrateError(Exception):
@@ -104,7 +116,8 @@ class Migration:
     def unit_state(self, unit):
         try:
             out = subprocess.run(["systemctl", "show", unit, "-p", "LoadState", "-p", "ActiveState",
-                                  "-p", "UnitFileState"], stdout=subprocess.PIPE, universal_newlines=True).stdout
+                                  "-p", "UnitFileState", "-p", "FragmentPath"],
+                                 stdout=subprocess.PIPE, universal_newlines=True).stdout
         except FileNotFoundError:
             return {}
         return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
@@ -151,6 +164,7 @@ class Migration:
             copies.append(db)
         if not steps and not copies:
             print("перенос с Lumen уже выполнен, изменений нет")
+            self.warn_unmonitored(states)
             return
         # копировать можно только у остановленных: агент пишет позицию журнала, сервер — базу
         steps.append(("проверить, что процессы Lumen завершились и службы отключены", self.wait_stopped))
@@ -171,6 +185,16 @@ class Migration:
         if not self.dry:
             sync()
             print("Готово. Старые юниты и каталоги (/opt/lumen, /etc/lumen, /var/lib/lumen*) оставлены для отката")
+
+    def warn_unmonitored(self, states):
+        """Прошлый запуск мог оборваться так, что откат не успел (kill -9, питание): Lumen уже выключен,
+        а Luxmon ещё не поставлен. Сами старые службы не включаем — install.sh сейчас поставит Luxmon,
+        и тогда работали бы обе версии сразу, — но говорим, что хост пока без мониторинга."""
+        old = [u for u, s in states.items() if s.get("LoadState") == "loaded" and u.endswith(".service")]
+        if old and not any(self.unit_state(u).get("ActiveState") in ACTIVE for u in LUXMON_UNITS):
+            print("внимание: службы Lumen остановлены, а Luxmon здесь не запущен — хост сейчас без мониторинга. "
+                  "Дождитесь установки Luxmon или верните Lumen: systemctl enable --now " + " ".join(old),
+                  file=sys.stderr, flush=True)
 
     def restore(self, states):
         """Вернуть старые службы в то состояние, в котором они были до переноса."""
@@ -216,9 +240,35 @@ class Migration:
                 continue
             data, notes = self.convert(name, src)
             mode = os.stat(src).st_mode & 0o777
-            steps.append((f"скопировать {src} → {dst}" + (" (" + "; ".join(notes) + ")" if notes else ""),
-                          lambda dst=dst, data=data, mode=mode: write_new(dst, data, mode)))
+            def copy(src=src, dst=dst, data=data, mode=mode, digest=file_sha(src)):
+                write_new(dst, data, mode)
+                self.record(src, digest)
+            steps.append((f"скопировать {src} → {dst}" + (" (" + "; ".join(notes) + ")" if notes else ""), copy))
         return steps
+
+    def record(self, src, digest):
+        """Запомнить, что файл перенесён и каким он был: --cleanup удалит старый, только если он с тех пор
+        не менялся. Наличия одноимённого файла в /etc/luxmon мало — он мог быть там до переноса."""
+        path = self.p(MANIFEST)
+        m = self.manifest()
+        m[src[len(self.root):]] = digest
+        os.makedirs(os.path.dirname(path), 0o700, exist_ok=True)
+        tmp = path + ".migrate-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        fsync_dir(os.path.dirname(path))
+
+    def manifest(self):
+        try:
+            with open(self.p(MANIFEST), encoding="utf-8") as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return m if isinstance(m, dict) else {}
 
     def convert(self, name, src):
         """Содержимое файла для /etc/luxmon и список изменений. В списке только пути и имена переменных:
@@ -277,7 +327,9 @@ class Migration:
                 def copy(src=src, dst=dst, n=n, dmode=dmode):
                     os.makedirs(n, dmode, exist_ok=True)
                     with open(src, "rb") as f:  # читаем после остановки агента: позиция журнала окончательная
-                        write_new(dst, f.read(), os.stat(src).st_mode & 0o777)
+                        data = f.read()
+                    write_new(dst, data, os.stat(src).st_mode & 0o777)
+                    self.record(src, hashlib.sha256(data).hexdigest())
                 steps.append((f"скопировать {src} → {dst}", copy))
         return steps
 
@@ -306,10 +358,19 @@ class Migration:
 
     @staticmethod
     def db_state(src):
-        """Размер и время изменения базы и журнала с точностью до наносекунд: любая запись в старую базу
-        меняет хотя бы одно из них. -shm не берём — он меняется и при чтении."""
-        return [[e, os.stat(src + e).st_size, os.stat(src + e).st_mtime_ns]
-                for e in ("", "-wal") if os.path.exists(src + e)]
+        """Размер и sha256 базы и журнала. По содержимому, а не по времени изменения: время можно вернуть
+        прежним (восстановление из копии, rsync -t), и тогда записи, сделанные Lumen после отката, остались бы
+        незамеченными. Хеш базы в сотни МБ — секунда-две. -shm не берём — он меняется и при чтении."""
+        out = []
+        for e in ("", "-wal"):
+            if not os.path.exists(src + e):
+                continue
+            h = hashlib.sha256()
+            with open(src + e, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            out.append([e, os.path.getsize(src + e), h.hexdigest()])
+        return out
 
     def plan_db(self):
         src, dst = self.old_db_path(), self.p(NEW_DB)
@@ -398,7 +459,8 @@ class Migration:
             # отметка «база опубликована, перенос не закончен» — до публикации: если прервёмся сразу после неё,
             # повторный запуск узнает свою копию и проверит её, а не остановится на «уже есть база»
             info = {"source": src, "backup": backup, "migrated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "source_state": self.db_state(src), "rows": rows}
+                    "source_state": self.db_state(src), "rows": rows,
+                    "backup_files": {f: file_sha(os.path.join(backup, f)) for f in sorted(os.listdir(backup))}}
             pending = self.p(PENDING)
             if os.path.exists(pending):
                 os.unlink(pending)  # от запуска, прерванного до публикации базы
@@ -446,6 +508,207 @@ class Migration:
         fsync_dir(os.path.dirname(dst))
         print(f"  перенос завершён, резервная копия: {info.get('backup')}", flush=True)
 
+    # ---- очистка, когда откат уже не нужен
+    def cleanup(self):
+        """Удалить юниты и каталоги Lumen. Необратимо, поэтому сначала проверяется, что удалять нечего
+        нужного: Lumen выключен, всё перенесено, старая база после переноса не менялась, Luxmon работает."""
+        states = {u: self.unit_state(u) for u in UNITS}
+        units = [u for u, s in states.items() if s.get("LoadState") == "loaded"]
+        dirs = [self.p(d) for d in OLD_DIRS if os.path.lexists(self.p(d))]
+        src = self.old_db_path()  # до удаления /etc/lumen: там мог быть свой путь к базе
+        dbfiles = [src + e for e in DB_EXT if os.path.exists(src + e)]
+        if not units and not dirs and not dbfiles:
+            print("следов Lumen на этом хосте нет — удалять нечего")
+            return
+
+        bad = [f"{u} ({s.get('ActiveState')}, {s.get('UnitFileState')})" for u, s in states.items()
+               if s.get("ActiveState") in ACTIVE or s.get("UnitFileState") in ENABLED]
+        bad += [f"процесс {p}" for p in self.old_processes()]
+        if bad:
+            raise MigrateError("Lumen ещё включён или работает: " + "; ".join(bad) + ". Сначала перенос (без --cleanup)")
+        if not any(self.unit_state(u).get("ActiveState") in ACTIVE for u in LUXMON_UNITS):
+            raise MigrateError("Luxmon на этом хосте не запущен — файлы Lumen могут понадобиться для отката. "
+                               "Сначала установите Luxmon (install.sh)")
+        left = [msg for msg, _ in self.plan_configs() + self.plan_state()]
+        if left:
+            raise MigrateError("не всё перенесено: " + "; ".join(left) + ". Сначала перенос (без --cleanup)")
+        differ = self.not_copied()
+        if differ:
+            raise MigrateError("эти файлы Lumen не переносились — в Luxmon уже был свой файл с другим содержимым — "
+                               "или менялись после переноса: " + ", ".join(differ)
+                               + ". Сравните с файлами в /etc/luxmon и /var/lib/luxmon-*, перенесите нужное, "
+                               "старые удалите вручную и запустите снова")
+        unknown = self.unknown_paths(src)
+        if unknown:
+            raise MigrateError("в каталогах Lumen есть то, чего перенос не знает, поэтому ничего не удалено: "
+                               + ", ".join(unknown[:10]) + (f" и ещё {len(unknown) - 10}" if len(unknown) > 10 else "")
+                               + ". Перенесите нужное или удалите вручную и запустите снова")
+        backup = backup_files = None
+        if dbfiles:
+            marker = self.p(MARKER)
+            if not os.path.exists(marker):
+                raise MigrateError(f"база {src} не перенесена в {NEW_DB}. Сначала перенос (без --cleanup)")
+            with open(marker, encoding="utf-8") as f:
+                m = json.load(f)
+            if os.path.realpath(m.get("source", "")) != os.path.realpath(src):
+                raise MigrateError(f"перенесена база {m.get('source')}, а старый сервер настроен на {src} — проверьте вручную")
+            if self.db_state(src) != m.get("source_state"):
+                raise MigrateError(f"база {src} менялась после переноса {m.get('migrated', '')} (был откат на Lumen?): "
+                                   f"в ней могут быть данные, которых нет в Luxmon. Не удаляю")
+            backup, backup_files = m.get("backup"), m.get("backup_files")
+            # путь берётся из отметки: удаляем по нему, только если это действительно копия рядом со старой базой
+            if backup and not (isinstance(backup, str) and BACKUP_NAME.fullmatch(os.path.basename(backup))
+                               and os.path.normpath(os.path.dirname(backup)) == os.path.normpath(os.path.dirname(src))
+                               and not os.path.islink(backup)):
+                raise MigrateError(f"в {marker} резервная копия {backup!r} — не копия переноса рядом с {src}. "
+                                   f"Проверьте вручную")
+
+        steps = []
+        for u in units:
+            frag = states[u].get("FragmentPath") or self.p(f"{UNIT_DIR}/{u}")
+            if os.path.normpath(os.path.dirname(frag)) != os.path.normpath(self.p(UNIT_DIR)):
+                # юнит не из нашей установки (например, из пакета) — не наше дело его удалять
+                print(f"пропущен {u}: файл юнита {frag} не в {UNIT_DIR}, удалите вручную, если нужно", file=sys.stderr)
+                continue
+            if os.path.lexists(frag):
+                steps.append((f"удалить {frag}", lambda path=frag: os.unlink(path)))
+            if os.path.lexists(frag + ".d"):
+                # дополнения к юниту пишет администратор — возможно, их надо перенести на luxmon-*; не удаляем
+                print(f"оставлен {frag}.d: перенесите нужное в юнит Luxmon и удалите вручную", file=sys.stderr)
+        if units:
+            steps.append(("systemctl daemon-reload", lambda: self.systemctl("daemon-reload")))
+        # база с журналами и её резервная копия — даже если «db» указывал вне /var/lib/lumen. Вне каталогов Lumen
+        # удаляем только файлы, созданные Lumen и переносом: рядом с базой могут лежать чужие
+        if backup and os.path.isdir(backup) and not any(inside(backup, d) for d in dirs):
+            # вне каталогов Lumen имени мало: файл удаляется, только если это ровно то, что скопировал перенос
+            if not isinstance(backup_files, dict):
+                print(f"оставлена {backup}: в отметке переноса нет хешей копии, удалите вручную", file=sys.stderr)
+                backup = None
+            else:
+                for name in sorted(os.listdir(backup)):
+                    path = os.path.join(backup, name)
+                    if backup_files.get(name) != (file_sha(path) if os.path.isfile(path) and not os.path.islink(path)
+                                                  else None):
+                        raise MigrateError(f"в резервной копии {backup} файл {name} не тот, что сделал перенос, "
+                                           f"поэтому ничего не удалено — проверьте вручную")
+                    dbfiles.append(path)
+        for path in dbfiles:
+            if not any(inside(path, d) for d in dirs):
+                steps.append((f"удалить {path}", lambda path=path: os.unlink(path)))
+        if backup and os.path.isdir(backup) and not any(inside(backup, d) for d in dirs):
+            steps.append((f"удалить {backup}, если в нём больше ничего нет", lambda: rmdir_if_empty(backup)))
+        for d in dirs:
+            steps.append((f"удалить {d}", lambda d=d: rmpath(d)))
+
+        for msg, fn in steps:
+            if self.dry:
+                print("[dry-run] будет: " + msg, flush=True)
+            else:
+                print(msg, flush=True)
+                fn()
+        if not self.dry:
+            sync()
+            print("Lumen удалён с этого хоста")
+
+    def not_copied(self):
+        """Старые конфиги и файлы состояния, удаление которых может потерять данные: перенос их не копировал
+        (в Luxmon уже был свой файл) или они изменились после копирования. Файл, совпадающий с файлом
+        Luxmon (для конфигов — после замены путей), тоже считается перенесённым."""
+        m, bad = self.manifest(), []
+        for old, new in ((OLD_ETC, NEW_ETC),) + STATE_DIRS:
+            o, n = self.p(old), self.p(new)
+            if not os.path.isdir(o) or os.path.islink(o):
+                continue
+            for name in sorted(os.listdir(o)):
+                src, dst = os.path.join(o, name), os.path.join(n, name)
+                if name.endswith((".tmp", ".migrate-tmp")) or not os.path.isfile(src) or os.path.islink(src) \
+                        or not os.path.isfile(dst):
+                    continue  # это разбирают plan_* и unknown_paths
+                if m.get(src[len(self.root):]) == file_sha(src):
+                    continue
+                with open(dst, "rb") as f:
+                    have = f.read()
+                if old == OLD_ETC:
+                    try:
+                        want = self.convert(name, src)[0]
+                    except (MigrateError, ValueError):
+                        want = None
+                else:
+                    with open(src, "rb") as f:
+                        want = f.read()
+                if want != have:
+                    bad.append(src)
+        return bad
+
+    def unknown_paths(self, src):
+        """Всё в каталогах Lumen, что не является его кодом или уже перенесённым файлом. Каталоги удаляются
+        целиком, поэтому любой незнакомый файл, подкаталог или ссылка — повод ничего не удалять."""
+        def entries(d):
+            return sorted(os.listdir(d)) if os.path.isdir(d) and not os.path.islink(d) else []
+
+        def regular(path):
+            return os.path.isfile(path) and not os.path.islink(path)
+        # каталог-ссылку не разбираем: удалив ссылку, не узнали бы, что было по ней
+        bad = [self.p(d) for d in OLD_DIRS if os.path.islink(self.p(d))]
+        # конфиги и состояние: только обычные файлы, у которых есть пара в каталоге Luxmon
+        for old, new in ((OLD_ETC, NEW_ETC),) + STATE_DIRS:
+            o, n = self.p(old), self.p(new)
+            for name in entries(o):
+                path = os.path.join(o, name)
+                if not regular(path) or not (name.endswith((".tmp", ".migrate-tmp"))
+                                             or os.path.lexists(os.path.join(n, name))):
+                    bad.append(path)
+        # код: то, что клала установка Lumen
+        o = self.p("/opt/lumen")
+        for name in entries(o):
+            path = os.path.join(o, name)
+            if name in CODE_DIRS and os.path.isdir(path) and not os.path.islink(path):
+                bad += [os.path.join(path, f) for f in entries(path)
+                        if not regular(os.path.join(path, f)) or not CODE_DIRS[name].fullmatch(f)]
+            elif not (regular(path) and (re.fullmatch(r"lumen-[\w-]+\.(py|sh)", name) or name == "tg-notify.py")):
+                bad.append(path)
+        # данные: проверенная база с журналами и резервные копии переноса из тех же файлов
+        v = self.p("/var/lib/lumen")
+        known = ({os.path.basename(src) + e for e in DB_EXT}
+                 if os.path.normpath(os.path.dirname(src)) == os.path.normpath(v) else set())
+        for name in entries(v):
+            path = os.path.join(v, name)
+            if regular(path) and name in known:
+                continue
+            if known and BACKUP_NAME.fullmatch(name) and os.path.isdir(path) and not os.path.islink(path):
+                bad += [os.path.join(path, f) for f in entries(path)
+                        if f not in known or not regular(os.path.join(path, f))]
+                continue
+            bad.append(path)
+        return bad
+
+
+def file_sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def inside(path, d):
+    path, d = os.path.normpath(path), os.path.normpath(d)
+    return os.path.commonpath([path, d]) == d
+
+
+def rmdir_if_empty(path):
+    try:
+        os.rmdir(path)
+    except OSError:
+        print(f"{path} не пуст — оставлен, посмотрите вручную", file=sys.stderr)
+
+
+def rmpath(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
@@ -453,15 +716,17 @@ def main(argv=None):
         # через ssh, pct exec и qm guest exec локаль бывает любой, а вывод читается в терминале UTF-8
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
-    if args not in ([], ["--dry-run"]):
+    if len(set(args)) != len(args) or not set(args) <= {"--dry-run", "--cleanup"}:
         print(__doc__, file=sys.stderr)
         return 2
+    dry, clean = "--dry-run" in args, "--cleanup" in args
     host = socket.gethostname()
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         print(f"{host}: ошибка: нужен root", file=sys.stderr)
         return 1
     try:
-        Migration(dry=bool(args)).run()
+        m = Migration(dry=dry)
+        m.cleanup() if clean else m.run()
     except MigrateError as e:
         print(f"{host}: ошибка: {e}", file=sys.stderr)
         return 1

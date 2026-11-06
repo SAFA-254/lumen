@@ -4,16 +4,19 @@
 # Запускать на pve1 из каталога репозитория. Существующие конфиги (/etc/luxmon/*.json, telegram.env, ключ TLS)
 # не трогаются — обновляются код, юниты и сертификат сервера; агенту в VM конфиг создаётся только при первой установке.
 # Прежнюю установку Lumen сначала переносит deploy/luxmon-migrate.py (см. «Обновление с Lumen» в README).
-#   ./install.sh             перенос с Lumen, если нужен, и обновление
-#   ./install.sh --dry-run   только показать, что перенос сделает на каждом хосте; ничего не меняется
+#   ./install.sh                       перенос с Lumen, если нужен, и обновление
+#   ./install.sh --dry-run             только показать, что перенос сделает на каждом хосте; ничего не меняется
+#   ./install.sh --cleanup [--dry-run] когда откат уже не нужен: удалить Lumen со всех хостов
 set -euo pipefail
 cd "$(dirname "$0")"
-DRY_RUN=0
-case "${1:-}" in
-  --dry-run) DRY_RUN=1 ;;
-  "") ;;
-  *) echo "использование: $0 [--dry-run]" >&2; exit 2 ;;
-esac
+DRY_RUN=0 CLEANUP=0
+for a in "$@"; do
+  case $a in
+    --dry-run) DRY_RUN=1 ;;
+    --cleanup) CLEANUP=1 ;;
+    *) echo "использование: $0 [--cleanup] [--dry-run]" >&2; exit 2 ;;
+  esac
+done
 NODES="192.168.3.3 192.168.3.4 192.168.3.5"
 # VM: vmid -> модули агента
 declare -A VM_MODULES=([104]='["system","ssh","logs","procs","updates"]' [105]='["system","ssh","logs","procs","updates","postgres"]' [106]='["system","ssh","logs","procs","updates","postgres"]')
@@ -80,23 +83,43 @@ migrate_vm() { # vmid [--dry-run]
   fi
   guest $node $vmid "python3 /tmp/luxmon-migrate.py $*; rc=\$?; rm -f /tmp/luxmon-migrate.py; exit \$rc"
 }
+HOSTS="pve1 ct:108 ct:101 $(printf 'node:%s ' $NODES)$(printf 'vm:%s ' "${!VM_MODULES[@]}")"
 # Проверка без изменений на всех хостах; сообщает обо всех ошибках сразу
-migrate_check() {
+migrate_check() { # [--cleanup]
   local t rc=0
-  for t in pve1 ct:108 ct:101 $(printf 'node:%s ' $NODES) $(printf 'vm:%s ' "${!VM_MODULES[@]}"); do
+  for t in $HOSTS; do
     echo "-- $t"
-    migrate_one $t --dry-run || rc=1
+    migrate_one $t "$@" --dry-run || rc=1
   done
   return $rc
 }
+# Хосты, где Lumen уже выключен, а Luxmon ещё не установлен. Если install.sh упадёт посередине,
+# об этих хостах надо сказать: без мониторинга они останутся до повторного запуска или отката.
+UNFINISHED=""
+installed() { UNFINISHED=$(echo " $UNFINISHED " | sed "s| $1 | |; s|^ *||; s| *$||"); }
+trap 'rc=$?; if [ $rc != 0 ] && [ -n "$UNFINISHED" ]; then
+  echo "Установка прервана. Lumen уже выключен, а Luxmon не установлен на: $UNFINISHED. Запустите $0 снова или верните там Lumen (README, «Откат»)" >&2
+fi' EXIT
 migrate() { # хост: перенести; при ошибке — стоп, хосты до него уже обновлены и работают на Luxmon
   echo "-- перенос с Lumen: $1"
   if ! migrate_one "$1"; then
     echo "Перенос остановлен на $1. Исправьте ошибку и запустите $0 снова — сделанное повторно не делается" >&2
     exit 1
   fi
+  UNFINISHED="$UNFINISHED $1"
 }
 
+if [ $CLEANUP = 1 ]; then
+  # необратимо, поэтому сначала проверка на всех хостах: удаляется, только если везде можно
+  echo "== Удаление Lumen: проверка на всех хостах"
+  if ! migrate_check --cleanup; then echo "Ничего не удалено: исправьте ошибки выше" >&2; exit 1; fi
+  [ $DRY_RUN = 1 ] && exit 0
+  for t in $HOSTS; do
+    echo "-- $t"
+    migrate_one $t --cleanup || { echo "Удаление остановлено на $t: хосты до него уже очищены, с $t и дальше — нет. Исправьте ошибку и запустите $0 --cleanup снова" >&2; exit 1; }
+  done
+  exit 0
+fi
 if [ $DRY_RUN = 1 ]; then
   echo "== Перенос с Lumen: проверка, ничего не меняется"
   if migrate_check; then echo "Проверка прошла"; else echo "Есть ошибки — см. выше" >&2; exit 1; fi
@@ -128,6 +151,7 @@ ssh $CT_NODE "pct exec 108 -- sh -c 'tar -C /opt/luxmon -xzf /tmp/app.tgz && rm 
   && /opt/luxmon/luxmon-server-setup.sh && systemctl daemon-reload && systemctl enable --quiet luxmon-server luxmon-agent \
   && systemctl restart luxmon-server luxmon-agent'; rm -rf $tmp"
 SERVER_NODE=$CT_NODE
+installed ct:108
 
 migrate ct:101
 echo "== CT 101 etcd-arbiter: агент"
@@ -136,6 +160,7 @@ push_ct 101 $tmp/luxmon-agent.py /opt/luxmon/luxmon-agent.py
 push_ct 101 $tmp/luxmon-agent.service /etc/systemd/system/luxmon-agent.service
 push_ct 101 $tmp/server.crt /etc/luxmon/server.crt 644
 ssh $CT_NODE "pct exec 101 -- sh -c 'systemctl daemon-reload && systemctl enable --quiet luxmon-agent && systemctl restart luxmon-agent'; rm -rf $tmp"
+installed ct:101
 
 # enable обязателен: перенос отключил lumen-agent, и без автозапуска после перезагрузки агента не было бы никакого
 for ip in $NODES; do
@@ -146,6 +171,7 @@ for ip in $NODES; do
   scp -q deploy/server.crt root@$ip:/etc/luxmon/server.crt
   scp -q deploy/luxmon-agent.service root@$ip:/etc/systemd/system/
   ssh root@$ip 'systemctl daemon-reload && systemctl enable --quiet luxmon-agent && systemctl restart luxmon-agent'
+  installed node:$ip
 done
 
 # Сторож живёт на pve1 — не на узле с Luxmon; шлёт в Telegram через /root/tg-notify.sh
@@ -154,6 +180,7 @@ mkdir -p /opt/luxmon
 install -m 755 deploy/luxmon-watchdog.py /opt/luxmon/luxmon-watchdog.py
 install -m 644 deploy/luxmon-watchdog.service deploy/luxmon-watchdog.timer /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --quiet --now luxmon-watchdog.timer
+installed pve1  # агент pve1 поставлен выше, вместе с узлами
 
 for vmid in "${!VM_MODULES[@]}"; do
   migrate vm:$vmid
@@ -173,6 +200,7 @@ for vmid in "${!VM_MODULES[@]}"; do
     rm -f "$cfg"
   fi
   guest $node $vmid 'systemctl daemon-reload && systemctl enable --quiet luxmon-agent && systemctl restart luxmon-agent && systemctl is-active luxmon-agent'
+  installed vm:$vmid
 done
 
 sleep 20
