@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "2026.11.06"  # видна в панели на странице агентов
+VERSION = "2026.11.06.1"  # видна в панели на странице агентов
 CONFIG_PATH = os.environ.get("LUXMON_AGENT_CONFIG", "/etc/luxmon/agent.json")
 CFG = {
     "server": "http://127.0.0.1:8095",
@@ -89,8 +89,11 @@ class Counters:
 
     def rate(self, key, value, now):
         p = self.prev.get(key)
+        if p and now - p[1] < 1.0:
+            # через миллисекунды после прошлого замера (старт агента) любой пакет дал бы гигабиты в секунду
+            return None
         self.prev[key] = (value, now)
-        if not p or now <= p[1] or value < p[0]:
+        if not p or value < p[0]:
             return None
         return (value - p[0]) / (now - p[1])
 
@@ -1120,6 +1123,7 @@ def main():
     global SERVER_CHECKS
     last_run = {}
     system(time.time())  # первые значения счётчиков
+    time.sleep(2)  # первая отправка — уже со скоростями за пару секунд, а не за миллисекунды
     load_cursor()
     errors = 0
     clock, clock_ts = {}, 0
