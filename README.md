@@ -152,6 +152,7 @@ server/web/                 Omega Luxmon — веб-панель:
 server/tg-notify.py         отправка в Telegram
 deploy/*.service            юниты systemd
 deploy/luxmon-server-setup.sh  пользователь luxmon и права на файлы сервера
+deploy/luxmon-migrate.py    перенос прежней установки Lumen на Luxmon (запускает install.sh)
 deploy/server.crt           сертификат сервера, который агенты используют для проверки HTTPS
 examples/                   примеры конфигов
 install.sh                  обновление кода на всех хостах кластера (агенты в VM — через qemu-guest-agent)
@@ -186,6 +187,32 @@ chmod 600 /etc/luxmon/agent.json
 cp deploy/luxmon-agent.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now luxmon-agent
 ```
+
+## Обновление с Lumen
+
+Если на хостах стоит прежняя версия (службы `lumen-*`, каталоги `/etc/lumen`, `/var/lib/lumen`), `install.sh` перед установкой переносит её на Luxmon скриптом `deploy/luxmon-migrate.py`. На каждом хосте он:
+
+- останавливает и отключает `lumen-watchdog.timer`, `lumen-watchdog`, `lumen-agent`, `lumen-server` и проверяет, что их процессов не осталось — иначе дальше не идёт;
+- копирует файлы из `/etc/lumen` в `/etc/luxmon`; файлы, которые в `/etc/luxmon` уже есть, не трогает. В конфигах пути `/etc/lumen/` и `/opt/lumen/` меняются на новые, `db` в `server.json` — на `/var/lib/luxmon/luxmon.db`, в `telegram.env` переменные `LUMEN_BOT_*` — на `LUXMON_BOT_*`. Пароли, роли и токены переносятся как есть;
+- копирует состояние агента и сторожа: `/var/lib/lumen-agent` → `/var/lib/luxmon-agent`, `/var/lib/lumen-watchdog` → `/var/lib/luxmon-watchdog`;
+- на сервере, когда старый сервер уже остановлен, копирует базу как есть, вместе с `-wal` и `-shm`, в `/var/lib/lumen/backup-<дата>/`, затем через SQLite backup API создаёт `/var/lib/luxmon/luxmon.db`, сверяет число строк в каждой таблице и делает `integrity_check`. Если в `/var/lib/luxmon` уже есть база, перенос останавливается с ошибкой и ничего не меняет.
+
+Все проверки выполняются до первого изменения. Старые юниты, каталоги и база не удаляются — они нужны для отката. Старая база после переноса остаётся рабочей; SQLite может влить в неё её же `-wal`, данные от этого не меняются.
+
+Порядок:
+
+1. На pve1 обновить репозиторий.
+2. `./install.sh --dry-run` — по каждому хосту показывает, что будет сделано, и проверяет, что перенос возможен; ничего не меняет. Должно закончиться строкой «Проверка прошла».
+3. `./install.sh` — сначала та же проверка на всех хостах (при ошибке ничего не меняется), затем перенос на каждом хосте и установка Luxmon. С остановки старых служб до запуска новых мониторинга нет — несколько минут; сторожа в это время тоже нет. Если перенос остановился на каком-то хосте, исправить ошибку и запустить `./install.sh` снова — уже сделанное повторно не делается.
+4. Проверить: дашборд открывается (войти заново — cookie сессии называется по-новому), графики показывают историю, `luxmon-server.py token list` показывает хосты, бот отвечает на `/status`.
+5. Когда откат уже не понадобится: на каждом хосте `rm -f /etc/systemd/system/lumen-* && systemctl daemon-reload` и удалить `/opt/lumen`, `/etc/lumen`, `/var/lib/lumen-agent`, `/var/lib/lumen-watchdog`; на сервере — `/var/lib/lumen` вместе с резервной копией.
+
+Откат (пока старые каталоги на месте):
+
+1. Остановить Luxmon: на CT 108 `systemctl disable --now luxmon-server luxmon-agent`, на остальных хостах `systemctl disable --now luxmon-agent`, на pve1 ещё `systemctl disable --now luxmon-watchdog.timer`.
+2. Включить Lumen: на CT 108 `systemctl enable --now lumen-server lumen-agent`, на остальных хостах `systemctl enable --now lumen-agent`, на pve1 `systemctl enable --now lumen-watchdog.timer`.
+3. Lumen продолжит со своей базы `/var/lib/lumen/lumen.db`. Данные, собранные Luxmon после переноса, в неё не попадут. Если старая база повреждена — при остановленном `lumen-server` вернуть файлы из `/var/lib/lumen/backup-<дата>/`.
+4. Чтобы потом перенести снова: на CT 108 отложить базу Luxmon (`mv /var/lib/luxmon /var/lib/luxmon.old-<дата>`) — иначе перенос остановится с ошибкой «база менялась после переноса», чтобы не оставить устаревшую копию. Если после отката меняли конфиги в `/etc/lumen` (пароли, токены), отложить и `/etc/luxmon`: существующие файлы перенос не перезаписывает.
 
 ## API
 
