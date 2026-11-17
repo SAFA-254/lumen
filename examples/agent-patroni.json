@@ -1,5 +1,5 @@
 {
-  "server": "https://192.168.3.7",
+  "server": "https://10.0.0.7",
   "token": "тот же, что в server.json",
   "host": "etcd-arbiter",
   "modules": [
@@ -7,11 +7,11 @@
     "patroni",
     "ssh"
   ],
-  "patroni_url": "http://192.168.3.11:8008",
+  "patroni_url": "http://10.0.0.11:8008",
   "etcd_urls": [
-    "http://192.168.3.11:2379",
-    "http://192.168.3.32:2379",
-    "http://192.168.3.8:2379"
+    "http://10.0.0.11:2379",
+    "http://10.0.0.32:2379",
+    "http://10.0.0.8:2379"
   ],
   "ca_file": "/etc/luxmon/server.crt"
 }

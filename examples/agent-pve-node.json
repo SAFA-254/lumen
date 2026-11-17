@@ -1,5 +1,5 @@
 {
-  "server": "https://192.168.3.7",
+  "server": "https://10.0.0.7",
   "token": "тот же, что в server.json",
   "host": "pve1",
   "modules": [

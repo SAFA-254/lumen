@@ -1,5 +1,5 @@
 #!/bin/bash
-# Обновление Luxmon. Сервер живёт в CT 108 (https://192.168.3.7), агенты — на pve1-3,
+# Обновление Luxmon. Сервер живёт в CT 108 (https://10.0.0.7), агенты — на pve1-3,
 # в CT 101 (etcd-arbiter), CT 108 и в VM 104-106 (ставятся через qemu-guest-agent).
 # Запускать на pve1 из каталога репозитория. Существующие конфиги (/etc/luxmon/*.json, telegram.env, ключ TLS)
 # не трогаются — обновляются код, юниты и сертификат сервера; агенту в VM конфиг создаётся только при первой установке.
@@ -17,7 +17,7 @@ for a in "$@"; do
     *) echo "использование: $0 [--cleanup] [--dry-run]" >&2; exit 2 ;;
   esac
 done
-NODES="192.168.3.3 192.168.3.4 192.168.3.5"
+NODES="${NODES:-10.0.0.3 10.0.0.4 10.0.0.5}"
 # VM: vmid -> модули агента
 declare -A VM_MODULES=([104]='["system","ssh","logs","procs","updates"]' [105]='["system","ssh","logs","procs","updates","postgres"]' [106]='["system","ssh","logs","procs","updates","postgres"]')
 
